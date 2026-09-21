@@ -7,7 +7,7 @@ name = "jevrag"
 version = "0.1.0"
 description = "Option-ready retrieval for decision models (TypeSafe Jev) on the CloudBTL landing layer"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.27"]
 

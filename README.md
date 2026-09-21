@@ -118,4 +118,4 @@ JevRAG는 그 사이의 루프입니다: 카드 만들기 → Jev가 자료·행
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
