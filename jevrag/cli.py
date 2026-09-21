@@ -1,4 +1,4 @@
-"""jevrag CLI — options / ask / walk / file / seed-trees / enrich-cards / replay."""
+"""jevrag CLI — options / ask / walk / file / watch / seed-trees / enrich-cards / replay."""
 from __future__ import annotations
 
 import argparse
@@ -33,6 +33,15 @@ def main(argv=None) -> int:
     f.add_argument("--limit", type=int, default=50); f.add_argument("--group-by-folder", action="store_true", help="file one per source folder, attach siblings")
     f.add_argument("--dry-run", action="store_true"); f.add_argument("--log", default=None); f.add_argument("--fan-out", type=int, default=20)
     sm = sub.add_parser("seed-trees", help="create the memory (도메인→주제) and filed trees with their skeletons")
+    wt = sub.add_parser("watch", help="keep filing as documents arrive (inbox folder with --local; notInTree queue on CloudBTL)")
+    wt.add_argument("--tree", default="filed"); wt.add_argument("--interval", type=float, default=5.0, help="seconds between polls")
+    wt.add_argument("--settle", type=float, default=3.0, help="seconds a file must stay unchanged before it is filed (local)")
+    wt.add_argument("--retry-after", type=float, default=3600.0, help="seconds before a document undecided at the root is asked again")
+    wt.add_argument("--no-group", action="store_true", help="file one by one instead of one per source folder + siblings")
+    wt.add_argument("--max-per-cycle", type=int, default=50); wt.add_argument("--fan-out", type=int, default=20)
+    wt.add_argument("--once", action="store_true", help="one pass over the queue, then exit (cron-friendly)")
+    wt.add_argument("--dry-run", action="store_true"); wt.add_argument("--log", default=None)
+    wt.add_argument("--install-launchd", action="store_true", help="macOS: write a LaunchAgent that keeps this watch running, print how to load it")
     ns = ap.parse_args(argv)
 
     def source():
@@ -91,9 +100,10 @@ def main(argv=None) -> int:
         results = []
         if ns.group_by_folder:
             groups: dict[str, list] = {}
+            inbox_ref = cb._rel_or_abs(cb.inbox) if hasattr(cb, "inbox") else None   # files lying directly in a local inbox are unrelated
             for d in todo:
                 key = (d.get("sourceRef") or "").rsplit("/", 1)[0]
-                groups.setdefault(key, []).append(d)
+                groups.setdefault(d["id"] if key == inbox_ref else key, []).append(d)
             for key, ds in groups.items():
                 results += file_group(ds, cb, tree=ns.tree, fan_out=ns.fan_out, namer=namer, dry_run=ns.dry_run, log=log)
         else:
@@ -101,6 +111,34 @@ def main(argv=None) -> int:
                 results.append(file_document(d, cb, tree=ns.tree, fan_out=ns.fan_out, namer=namer, dry_run=ns.dry_run, log=log))
         from collections import Counter
         print(json.dumps({"filed": len(results), "status": dict(Counter(p.status for p in results)), "new_folders": [p.created_folder for p in results if p.created_folder]}, ensure_ascii=False)); return 0
+    if ns.cmd == "watch":
+        from .watch import Watcher, launchd_plist, LAUNCHD_LABEL
+        from .filing import Namer
+        from .enrich_cards import Ollama, DEFAULT_MODEL
+        if ns.install_launchd:
+            from pathlib import Path
+            argv_clean = [a for a in (argv if argv is not None else sys.argv[1:]) if a != "--install-launchd"]
+            log_path = ns.log or str(Path.home() / "Library/Logs/jevrag-watch.log")
+            plist = Path.home() / "Library/LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text(launchd_plist(argv_clean, log_path), encoding="utf-8")
+            print(f"wrote {plist}\nload:   launchctl bootstrap gui/$(id -u) {plist}\nunload: launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}\nlog:    {log_path}"); return 0
+        cb = source()
+        logf = open(ns.log, "a", encoding="utf-8") if ns.log else None
+        def log(rec):
+            print(json.dumps({"ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"), **rec}, ensure_ascii=False), file=logf or sys.stdout, flush=True)
+        try:
+            namer = Namer(Ollama(model=DEFAULT_MODEL))
+        except Exception:  # noqa: BLE001
+            namer = Namer(None)
+        w = Watcher(cb, tree=ns.tree, namer=namer, settle=ns.settle, retry_after=ns.retry_after, group_by_folder=not ns.no_group,
+                    fan_out=ns.fan_out, max_per_cycle=ns.max_per_cycle, dry_run=ns.dry_run, log=log)
+        def on_cycle(res):
+            if res:
+                print(json.dumps({"event": "cycle", "filed": len(res), "status": {k: sum(1 for p in res if p.status == k) for k in {p.status for p in res}},
+                                  "paths": sorted({p.path for p in res if p.path})[:10]}, ensure_ascii=False), file=sys.stderr, flush=True)
+        st = w.run(interval=ns.interval, once=ns.once, on_cycle=on_cycle)
+        print(json.dumps({"cycles": st.cycles, "filed": st.filed, "status": st.statuses, "waiting": st.waiting, "skipped_partial": st.skipped_partial, "deferred": st.deferred}, ensure_ascii=False)); return 0
     if ns.cmd == "replay":
         p = Pipeline.from_env()
         for rec in DecisionLog(ns.log_path).read():

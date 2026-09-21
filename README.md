@@ -162,6 +162,21 @@ them next to the baseline. Where things live, laptop to lake:
 | Human override | move the file; it is pinned | `POST /trees/:t/move by=human`; pinned |
 | Engine, thresholds, rules, logs | **the same** | **the same** |
 
+### Keep filing as files arrive — `jevrag watch`
+
+```bash
+jevrag --local ~/Documents --inbox ~/Downloads watch --log ~/Documents/.jevrag/file.jsonl
+jevrag --local ~/Documents --inbox ~/Downloads watch --install-launchd     # macOS: LaunchAgent, KeepAlive; prints the launchctl lines
+jevrag watch --tree filed --once                                            # CloudBTL: one pass over GET /documents?notInTree=filed (cron)
+```
+
+One loop for both sources: poll the queue, file what is ready, sleep `--interval` (5 s). On a desk "ready" means the
+file has stopped changing for `--settle` seconds (3) — a download or a save in progress is left alone — and browser/Office
+temp names (`.crdownload`, `.part`, `~$…`) are never touched. Files lying directly in the inbox are filed one by one;
+a folder dropped into the inbox is filed as a group. A document undecided at the root stays in the queue and is not asked
+again for `--retry-after` seconds (3600) — its card may get richer meanwhile. Every placement goes to the same log as
+`jevrag file`; each cycle prints a one-line summary to stderr.
+
 ## The loop, step by step
 
 1. **Candidates** — `Pipeline` pulls documents in scope from CloudBTL (`GET /api/me/proposals`,
