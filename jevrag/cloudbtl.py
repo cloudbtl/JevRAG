@@ -73,3 +73,19 @@ class CloudBTL:
         """One hop: child nodes → documents (or pages of a document), each with its cards."""
         r = self._c.get("/api/options", params={"tree": tree, "at": at, "limit": str(limit), "offset": str(offset)}); r.raise_for_status()
         return r.json()
+
+    # ── write side (enrichers) ──
+    def put_descriptors(self, target: dict[str, str], producer: str, producer_version: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """PUT descriptors on a document ({'proposalId': …}) or a node ({'nodeId': …}). Replace semantics per (target, producer, kind)."""
+        body = {"producer": producer, "producerVersion": producer_version, "items": items}
+        if "nodeId" in target:
+            r = self._c.put(f"/api/nodes/{target['nodeId']}/descriptors", json=body)
+        else:
+            r = self._c.put(f"/api/proposals/{target['proposalId']}/descriptors", json=body)
+        r.raise_for_status()
+        return r.json()
+
+    def node_descriptors(self, node_id: str, kind: str | None = None, producer: str | None = None) -> list[dict[str, Any]]:
+        params = {k: v for k, v in (("kind", kind), ("producer", producer)) if v}
+        r = self._c.get(f"/api/nodes/{node_id}/descriptors", params=params); r.raise_for_status()
+        return r.json().get("descriptors", [])

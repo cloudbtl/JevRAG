@@ -134,3 +134,93 @@ def test_walk_with_jev_uses_scores_and_masks_state():
     assert [h.source for h in res.hops] == ["jev"]
     assert res.path == ["PM"] and res.status == "leaf"  # PM 아래는 비어 있다
     assert seen[0]["state"]["candidates"][0]["kind"] == "node"
+
+
+# ── llm card enricher (Ollama mock + CloudBTL mock) ──
+
+def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.enrich_cards import CardEnricher, Ollama, PRODUCER
+    puts = []
+    listed = []
+    def cb_handler(request: httpx.Request):
+        p = request.url.path
+        if p == "/api/documents":
+            listed.append(dict(request.url.params))
+            if request.url.params.get("node"):
+                return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_rr", "title": "Rent Roll"}], "nextCursor": None})
+            return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_rr", "title": "Rent Roll", "originalFilename": "rr.xlsx", "documentType": "xlsx", "sourceRef": "LM/SEI/rr.xlsx", "metadata": {"division": "LM"}}], "nextCursor": None})
+        if p == "/api/proposals/prop_rr/descriptors":
+            if request.method == "PUT":
+                puts.append(("doc", json.loads(request.content))); return httpx.Response(200, json={"ok": True, "written": 1, "kinds": ["card.doc"]})
+            rows = [{"kind": "card.doc", "page": 0, "producer": "cloudbtl-baseline", "payload": {"pageCount": 2, "pageLabels": ["RentRoll_SEI", "층별"], "headline": "SEI 렌트롤"}},
+                    {"kind": "text.page", "page": 2, "producer": "cloudbtl-baseline", "payload": {"text": "층별 현황 SECRET-2"}},
+                    {"kind": "text.page", "page": 1, "producer": "cloudbtl-baseline", "payload": {"text": "삼성전자 21층 보증금 196,957,000 임대료 20,894,500"}}]
+            if request.url.params.get("producer") == "cloudbtl-baseline" or not request.url.params.get("kind"):
+                return httpx.Response(200, json={"ok": True, "descriptors": rows})
+            return httpx.Response(200, json={"ok": True, "descriptors": [r for r in rows if r["kind"] == request.url.params.get("kind")] + [{"kind": "card.doc", "page": 0, "producer": PRODUCER, "payload": {"summary": "SEI타워 렌트롤"}}]})
+        if p == "/api/trees":
+            return httpx.Response(200, json={"ok": True, "trees": [{"key": "folders", "id": "tree_1"}]})
+        if p == "/api/options":
+            at = request.url.params.get("at")
+            if at == "root":
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Folders", "path": "", "depth": 0}, "card": {"docCountTotal": 1, "byType": {"xlsx": 1}},
+                                                 "options": [{"kind": "node", "id": "node_lm", "label": "LM", "node": {}, "cards": [{"producer": "cloudbtl-baseline", "payload": {}}]}], "totals": {}, "nextOffset": None})
+            if at == "node_lm":
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_lm", "label": "LM", "path": "LM", "depth": 1}, "card": {"docCountTotal": 1, "byType": {"xlsx": 1}},
+                                                 "options": [{"kind": "node", "id": "node_done", "label": "done", "node": {}, "cards": [{"producer": PRODUCER, "payload": {"summary": "already"}}]}], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_done", "label": "done", "path": "LM/done", "depth": 2}, "card": {"docCountTotal": 1}, "options": [], "totals": {}, "nextOffset": None})
+        if p == "/api/nodes/node_root/descriptors" and request.method == "GET":
+            return httpx.Response(200, json={"ok": True, "descriptors": []})
+        if p.startswith("/api/nodes/") and request.method == "PUT":
+            puts.append(("node:" + p.split("/")[3], json.loads(request.content))); return httpx.Response(200, json={"ok": True, "written": 1, "kinds": ["card.node"]})
+        return httpx.Response(404, json={"error": p})
+    prompts = []
+    def ollama_handler(request: httpx.Request):
+        body = json.loads(request.content)
+        prompts.append(body)
+        assert body["format"]["type"] == "object" and body["think"] is False
+        is_doc = "docType" in body["format"]["properties"]
+        content = {"summary": "SEI타워 21층 삼성전자 등 임차인별 보증금·임대료 렌트롤", "docType": "렌트롤", "topics": ["렌트롤", "보증금"], "entities": ["SEI타워", "삼성전자"], "period": "2019-11", "language": "ko"} if is_doc \
+            else {"summary": "SEI타워 임대 관리 자료(렌트롤·층별 현황)", "topics": ["임대"], "entities": ["SEI타워"], "period": "2019"}
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": json.dumps(content, ensure_ascii=False)}})
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(cb_handler))
+    llm = Ollama(base="http://ollama.local", model="qwen-test:1b", transport=httpx.MockTransport(ollama_handler))
+    logs = []
+    st = CardEnricher(cb, llm, logs.append).run(limit=10)
+    assert st.documents == 1 and st.failed == 0
+    # 문서 선택은 서버 필터로 (missingProducer=llm-cards, kind=text.page)
+    assert listed[0]["missingProducer"] == PRODUCER and listed[0]["kind"] == "text.page"
+    # 문서 프롬프트는 페이지 순서대로 본문을 담고, 쓰기는 producer=llm-cards, version=모델 태그
+    assert prompts[0]["messages"][1]["content"].index("[p1 RentRoll_SEI]") < prompts[0]["messages"][1]["content"].index("[p2 층별]")
+    kind, body = puts[0]
+    assert kind == "doc" and body["producer"] == PRODUCER and body["producerVersion"] == "qwen-test-1b"
+    assert body["items"][0]["kind"] == "card.doc" and body["items"][0]["payload"]["docType"] == "렌트롤" and body["items"][0]["payload"]["model"] == "qwen-test:1b"
+    # 노드: 깊은 것부터, 이미 llm 카드가 있는 노드(node_done)는 건너뛰고 LM·root 를 쓴다
+    node_puts = [k for k, _ in puts if k.startswith("node:")]
+    assert node_puts == ["node:node_lm", "node:node_root"]
+    assert st.nodes == 2
+    node_prompt = prompts[1]["messages"][1]["content"]
+    assert "Rent Roll — SEI타워 렌트롤" in node_prompt   # 노드 요약은 안의 문서 카드를 본다
+    assert all(r.get("summary") or r.get("error") for r in logs)
+
+
+def test_enrich_cards_survives_a_failing_document():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.enrich_cards import CardEnricher, Ollama
+    def cb_handler(request: httpx.Request):
+        p = request.url.path
+        if p == "/api/documents":
+            return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_bad", "title": "bad"}, {"id": "prop_ok", "title": "ok"}], "nextCursor": None})
+        if p.endswith("/descriptors") and request.method == "GET":
+            if "prop_bad" in p:
+                return httpx.Response(500, json={"error": "boom"})
+            return httpx.Response(200, json={"ok": True, "descriptors": [{"kind": "text.page", "page": 1, "producer": "cloudbtl-baseline", "payload": {"text": "hello"}}]})
+        if p.endswith("/descriptors") and request.method == "PUT":
+            return httpx.Response(200, json={"ok": True})
+        if p == "/api/trees":
+            return httpx.Response(200, json={"ok": True, "trees": []})
+        return httpx.Response(404)
+    llm = Ollama(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"message": {"content": json.dumps({"summary": "s", "docType": "d", "topics": [], "entities": [], "period": "", "language": "en"})}})))
+    st = CardEnricher(CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(cb_handler)), llm).run(limit=10)
+    assert st.documents == 1 and st.failed == 1
