@@ -96,8 +96,9 @@ class Namer:
         schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
         try:
             out = self.llm.json(
-                "너는 회사 문서 폴더의 이름을 짓는 사서다. 짧고(2~6단어) 형제 폴더와 같은 결의 한국어 이름을 짓는다. 날짜·버전·날인 여부는 넣지 않는다. JSON 만.",
-                f"상위 폴더: {parent}\n형제 폴더: {', '.join(siblings[:12]) or '(없음)'}\n이 층의 폴더 이름 기준: {level}\n넣을 문서:\n{question}\n\n이 문서가 들어갈 새 폴더 이름 하나를 JSON 으로: name",
+                "너는 회사 문서 폴더의 이름을 짓는 사서다. 짧고(2~6단어) 형제 폴더와 같은 결의 한국어 이름을 짓는다. "
+                "날짜·버전·날인 여부·회사명 접두어([Sweetspot], 스위트스팟)는 넣지 않는다. 형제 폴더 중 같은 대상을 가리키는 이름이 있으면 그 이름을 글자 그대로 돌려준다. JSON 만.",
+                f"상위 폴더: {parent}\n형제 폴더: {', '.join(siblings[:12]) or '(없음)'}\n이 층의 폴더 이름 기준: {level}\n넣을 문서:\n{question}\n\n이 문서가 들어갈 폴더 이름 하나를 JSON 으로: name",
                 schema,
             )
             name = str(out.get("name") or "").strip().replace("/", "·")[:40]
@@ -130,8 +131,9 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
             new_path = (path + "/" if path else "") + name
             hops.append({"at": path or "(root)", "candidates": [], "ranked": [], "chosen": NEW, "source": "rule:empty-domain", "jev_ms": None})
             return _finish(doc, cb, tree, new_path, None, name, hops, "placed_new_folder", t0, dry_run, log, question)
+        is_domain = node_meta.get("kind") == "domain"
         choices = list(folders)
-        if hops or not folders:  # 루트에 바로 두는 건 마지막 수단 — 자식 폴더가 있을 때 루트의 'here' 는 첫 홉에서 빼고 진행
+        if (hops or not folders) and not is_domain:  # 루트·도메인 폴더에 바로 두는 건 없다 — 자식 폴더가 있을 때 루트의 'here' 는 첫 홉에서 빼고 진행
             choices.append(HopCard(HERE, "here", "■ 여기에 둔다", "현재 폴더가 이 문서의 자리 — 형제 문서들과 같은 종류·주제", {"path": path or "(root)", "docs": (res.get("card") or {}).get("docCount")}))
         choices.append(HopCard(NEW, "new", "＋ 새 폴더", "자식 중에 맞는 곳이 없어 이 폴더 안에 새 폴더를 만든다", {"siblings": len(folders)}))
         hop = _decide_hop(question, node, choices, jev)
@@ -139,6 +141,16 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
         hops.append({"at": path or "(root)", "candidates": [c.for_model() | {"id": c.id} for c in choices], "ranked": hop.ranked[:5],
                      "chosen": hop.chosen.id if hop.chosen else None, "source": hop.source, "jev_ms": hop.jev.elapsed_ms if hop.jev else None})
         ch = hop.chosen
+        if ch is None and is_domain:
+            # 도메인 폴더에서 미결: 문서를 여기 두지 않는다. 이름을 지어 보고, 형제 중 같은 이름이 있으면 그 폴더로 들어가고 없으면 만든다.
+            name = namer.name(question, [f.label for f in folders], path, depth=path.count("/") + 2)
+            match = next((f for f in folders if _same_label(f.label, name)), None)
+            if match is not None:
+                hops[-1]["chosen"] = match.id; hops[-1]["source"] += "+rule:namer-match"
+                at = match.id; continue
+            new_path = path + "/" + name
+            hops[-1]["chosen"] = NEW; hops[-1]["source"] += "+rule:domain-new"
+            return _finish(doc, cb, tree, new_path, None, name, hops, "placed_new_folder", t0, dry_run, log, question)
         if ch is None:
             # 아무것도 문턱을 못 넘김. 루트라면 두지 않고 대기열에 남긴다(루트는 쓰레기통이 되기 쉽다); 아래층이면 현재 폴더에 둔다(가장 구체적인 확정 지점).
             if not path:
@@ -148,10 +160,19 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
             return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
         if ch.kind == "new":
             name = namer.name(question, [f.label for f in folders], path or "(root)", depth=path.count("/") + 2 if path else 1)
+            match = next((f for f in folders if _same_label(f.label, name)), None)
+            if match is not None:   # 모델이 '새 폴더' 를 골랐지만 지은 이름이 이미 있다 — 중복 폴더 대신 그 폴더로
+                hops[-1]["chosen"] = match.id; hops[-1]["source"] += "+rule:namer-match"
+                at = match.id; continue
             new_path = (path + "/" if path else "") + name
             return _finish(doc, cb, tree, new_path, None, name, hops, "placed_new_folder", t0, dry_run, log, question)
         at = ch.id
     return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
+
+
+def _same_label(a: str, b: str) -> bool:
+    norm = lambda x: "".join(ch for ch in str(x).lower() if ch.isalnum())  # noqa: E731
+    return bool(norm(a)) and norm(a) == norm(b)
 
 
 def _finish(doc, cb, tree, path, node_id, created, hops, status, t0, dry_run, log, question, move: bool = True) -> Placement:

@@ -335,6 +335,38 @@ def test_filing_makes_the_first_subfolder_in_an_empty_domain_and_siblings_follow
     assert [p.status for p in out] == ["undecided", "undecided_with_group"] and moves == []
 
 
+def test_filing_in_a_domain_folder_never_drops_the_document_there_and_reuses_a_sibling_the_namer_names():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_document, Namer
+    moves = []
+    def handler(request: httpx.Request):
+        p = request.url.path
+        if p == "/api/options":
+            at = request.url.params.get("at")
+            if at == "root":
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {},
+                                                 "options": [{"kind": "node", "id": "node_re", "label": "부동산본부", "weight": 1, "node": {"path": "부동산본부", "depth": 1, "docCount": 0, "docCountTotal": 1, "children": 1},
+                                                              "cards": [{"producer": "cloudbtl-baseline", "payload": {"metadata": {"kind": "domain", "description": "임대차·LOI·IM"}}}]}], "totals": {}, "nextOffset": None})
+            if at == "node_re":
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain"}},
+                                                 "options": [{"kind": "node", "id": "node_g", "label": "더갤러리832", "weight": 1, "node": {"path": "부동산본부/더갤러리832", "depth": 2, "docCount": 1, "docCountTotal": 1, "children": 0}, "cards": []}], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_g", "label": "더갤러리832", "path": "부동산본부/더갤러리832"}, "ancestors": [], "card": {"docCount": 1}, "options": [], "totals": {}, "nextOffset": None})
+        return _filing_tree_handler(moves, request)
+    def jev_handler(request: httpx.Request):
+        body = json.loads(request.content); at = body["state"].get("at", ""); cands = body["state"]["candidates"]
+        answers = {f"q{i}": {"type": "score", "score": 3 if (at == "Filed" and c["kind"] == "node") else 0, "confidence": 0.5} for i, c in enumerate(cands)}
+        return httpx.Response(200, json={"model": "jev-test", "answers": answers})
+    class StubNamer(Namer):
+        def name(self, question, siblings, parent, depth=1):
+            return "더갤러리 832"   # 형제 '더갤러리832' 와 같은 대상 — 표기만 다르다
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
+    pl = file_document({"id": "prop_loi", "title": "입점의향서_더갤러리832", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=StubNamer(None))
+    # 도메인 폴더에서 모델이 미결 → '여기' 는 선택지에도 없고, Namer 이름이 형제와 같아 그 폴더로 내려가 거기에 둔다
+    assert [c["kind"] for c in pl.hops[1]["candidates"]] == ["node", "new"]
+    assert pl.hops[1]["chosen"] == "node_g" and pl.hops[1]["source"].endswith("+rule:namer-match")
+    assert pl.status == "undecided_here" and pl.path == "부동산본부/더갤러리832" and moves[-1]["to"] == "부동산본부/더갤러리832"
+
+
 def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():
     from jevrag.cloudbtl import CloudBTL
     from jevrag.filing import file_document
