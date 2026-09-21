@@ -181,7 +181,7 @@ class Hop:
 @dataclass
 class Walk:
     question: str
-    status: str            # document | page | stopped | leaf | insufficient_options | max_hops | empty
+    status: str            # document | page | stopped | folder | leaf | insufficient_options | max_hops | empty
     hops: list[Hop]
     target: HopCard | None
 
@@ -197,6 +197,12 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
     exhausted: set[str] = set()         # branches we backed out of — never re-enter
     group_filter: list[str] | None = None
     hops: list[Hop] = []
+    best_folder: tuple[float, HopCard] | None = None   # deepest folder whose contents matched the topic — the answer when no document stands out
+
+    def give_up(status: str) -> Walk:
+        if best_folder is not None:
+            return Walk(question, "folder", hops, best_folder[1])
+        return Walk(question, status, hops, None)
     for _ in range(max_hops):
         at = stack[-1]
         res = cb.options(tree=tree, at=at, limit=fan_out)
@@ -210,7 +216,7 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         if not cards:
             if len(stack) > 1:
                 exhausted.add(at); stack.pop(); continue      # dead end → back up, no model call needed
-            return Walk(question, "empty" if not hops else "leaf", hops, hops[-1].chosen if hops else None)
+            return give_up("empty" if not hops else "leaf")
         choices = list(cards)
         if len(stack) > 1:
             choices.append(HopCard(UP, "up", "↑ 한 단계 위로", "이 폴더에는 없어 보임 — 상위 폴더로 돌아간다", {"depth": len(stack) - 1}))
@@ -219,6 +225,11 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         hop = _decide_hop(question, res.get("at") or {}, choices, jev)
         hops.append(hop)
         ch = hop.chosen
+        if at_node and len(stack) > 1 and hop.ranked:
+            inner = max((sc for cid, sc, _ in hop.ranked if cid not in (UP, STOP)), default=0.0)
+            if inner >= 1.0 and (best_folder is None or len(stack) > best_folder[1].facts.get("depth", 0) or inner > best_folder[0]):
+                node = res.get("at") or {}
+                best_folder = (inner, HopCard(at, "node", str(node.get("label") or at), "", {"depth": len(stack), "path": node.get("path", "")}))
         if ch is None and not any(c.kind == "node" for c in cards):
             # leaf folder: the best option is a document whose card only proves the topic matches (a filename, say). A person opens it.
             best_id, best_score, _ = hop.ranked[0]
@@ -228,7 +239,7 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         if ch is None:
             if len(stack) > 1:                                 # nothing convincing here → treat as 'up'
                 exhausted.add(at); stack.pop(); continue
-            return Walk(question, "insufficient_options", hops, None)
+            return give_up("insufficient_options")
         if ch.kind == "up":
             exhausted.add(at); stack.pop(); continue
         if ch.kind == "stop":
@@ -240,7 +251,9 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         if ch.kind == "document" and not into_pages:
             return Walk(question, "document", hops, ch)
         stack.append(ch.id)
-    return Walk(question, "max_hops", hops, hops[-1].chosen if hops and hops[-1].chosen and hops[-1].chosen.kind in ("node", "document") else None)
+    if hops and hops[-1].chosen and hops[-1].chosen.kind in ("node", "document"):
+        return Walk(question, "max_hops", hops, hops[-1].chosen)
+    return give_up("max_hops")
 
 
 def _decide_hop(question: str, at: dict[str, Any], cards: list[HopCard], jev: Jev) -> Hop:
