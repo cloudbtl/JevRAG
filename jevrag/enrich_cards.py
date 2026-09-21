@@ -130,15 +130,19 @@ STALE_ABS = 3        # 노드 요약을 다시 만드는 문서 수 변화 — �
 STALE_REL = 0.2      # 비율 중 큰 쪽을 넘으면
 
 
-def _fresh(cards: list[dict[str, Any]], docs_now: int) -> bool:
-    """llm-cards 노드 카드가 있고, 요약 당시 문서 수(payload.basis.docs)가 지금과 크게 다르지 않으면 참. basis 가 없는 옛 카드는 낡은 것으로."""
+def _card_state(cards: list[dict[str, Any]], docs_now: int) -> str:
+    """'fresh' = llm-cards 노드 카드가 있고 요약 당시 문서 수(payload.basis.docs)가 지금과 크게 다르지 않다; 'stale' = 있지만 많이 달라졌다(basis 없는 옛 카드 포함); 'none' = 없다."""
     mine = next((c for c in cards if c.get("producer") == PRODUCER), None)
     if not mine:
-        return False
+        return "none"
     basis = ((mine.get("payload") or {}).get("basis") or {}).get("docs")
     if basis is None:
-        return False
-    return abs(int(docs_now or 0) - int(basis)) <= max(STALE_ABS, STALE_REL * int(basis))
+        return "stale"
+    return "fresh" if abs(int(docs_now or 0) - int(basis)) <= max(STALE_ABS, STALE_REL * int(basis)) else "stale"
+
+
+def _fresh(cards: list[dict[str, Any]], docs_now: int) -> bool:
+    return _card_state(cards, docs_now) == "fresh"
 
 
 class CardEnricher:
@@ -172,7 +176,7 @@ class CardEnricher:
         """All nodes of a tree with whether they already carry an llm-cards card. Deepest first."""
         nodes: list[dict[str, Any]] = []
 
-        def visit(at: str, has: bool | None) -> None:
+        def visit(at: str, state: str | None) -> None:
             offset = 0
             first: dict[str, Any] | None = None
             children: list[dict[str, Any]] = []
@@ -185,17 +189,18 @@ class CardEnricher:
                 offset = hop["nextOffset"]
             node = (first or {}).get("at") or {}
             docs_total = ((first or {}).get("card") or {}).get("docCountTotal", 0)
-            if has is None:  # 루트는 홉 응답에 자기 카드가 없다 — 직접 묻는다
-                has = _fresh(self._node_cards(node["id"]), docs_total)
+            if state is None:  # 루트는 홉 응답에 자기 카드가 없다 — 직접 묻는다
+                state = _card_state(self._node_cards(node["id"]), docs_total)
             nodes.append({"id": node["id"], "label": node.get("label"), "path": node.get("path"), "depth": node.get("depth", 0),
-                          "card": (first or {}).get("card") or {}, "children": [c["label"] for c in children], "has": has,
+                          "card": (first or {}).get("card") or {}, "children": [c["label"] for c in children], "has": state == "fresh", "state": state,
                           "docs_total": docs_total})
             for c in children:
                 # 자식의 카드는 홉 응답에 실려 있다 — 자식 홉에서 다시 물을 필요가 없다. 요약 당시 문서 수(basis)와 지금이 많이 다르면 낡은 것으로 본다.
-                visit(c["id"], _fresh(c.get("cards") or [], (c.get("node") or {}).get("docCountTotal", 0)))
+                visit(c["id"], _card_state(c.get("cards") or [], (c.get("node") or {}).get("docCountTotal", 0)))
 
         visit("root", None)
-        nodes.sort(key=lambda n: -int(n["depth"] or 0))
+        # 낡은 카드(이미 누군가 읽고 있는, 대개 상위 노드)를 먼저 고치고, 그다음 카드가 없는 노드를 깊은 것부터(부모가 자식 요약을 보도록).
+        nodes.sort(key=lambda n: (0 if n["state"] == "stale" else 1, -int(n["depth"] or 0)))
         return nodes
 
     def _node_cards(self, node_id: str) -> list[dict[str, Any]]:

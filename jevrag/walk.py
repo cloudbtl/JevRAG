@@ -21,7 +21,8 @@ from typing import Any, Protocol
 from .jev import Jev, JevResult, USEFULNESS_RUBRIC
 from .options import mask
 
-USEFUL_MIN = 2
+USEFUL_MIN = 2           # documents, pages, stop: "useful for locating / partial evidence" or better
+NODE_MIN = 1.5           # folders only locate — a folder card rarely "directly states" anything, so entering one takes less
 GROUP_THRESHOLD = 8      # more documents than this at a node → show type groups first
 _WORD = re.compile(r"[\w가-힣]+")
 
@@ -239,7 +240,8 @@ def _decide_hop(question: str, at: dict[str, Any], cards: list[HopCard], jev: Je
         ranked = _heuristic_rank(question, cards)
         source = "heuristic"
     best_id, best_score, _ = ranked[0]
-    chosen = next((c for c in cards if c.id == best_id), None) if best_score >= USEFUL_MIN else None
+    best = next((c for c in cards if c.id == best_id), None)
+    chosen = best if best is not None and best_score >= (NODE_MIN if best.kind == "node" else USEFUL_MIN) else None
     return Hop(at=at, cards=cards, ranked=ranked, chosen=chosen, source=source, jev=res)
 
 
