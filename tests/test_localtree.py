@@ -141,3 +141,23 @@ def test_put_descriptors_replace_per_producer_and_show_up_in_hops(desk: LocalTre
     assert [r["payload"]["summary"] for r in rows] == ["렌트롤(임차인별 보증금·임대료)"]
     cards = hop_cards(desk.options(at="node:업무")["options"])
     assert next(c for c in cards if c.label == "렌트롤").summary == "렌트롤(임차인별 보증금·임대료)"
+
+
+def test_gather_brings_every_matching_document_across_folders(desk: LocalTree):
+    from jevrag.gather import gather
+    (desk.root / "업무" / "계약서" / "임대차계약서_SEI타워_21층.pdf").write_bytes(b"x")
+    desk.invalidate()
+    def jev_handler(request: httpx.Request):
+        body = json.loads(request.content); cands = body["state"]["candidates"]
+        def score(c):
+            if c["kind"] == "node":
+                return 3 if c["label"] in ("업무", "렌트롤", "계약서") else 0
+            return 3 if "SEI" in c["label"] else (1 if "계약" in c["label"] else 0)
+        answers = {f"q{i}": {"type": "score", "score": score(c), "confidence": 0.7} for i, c in enumerate(cands)}
+        return httpx.Response(200, json={"model": "jev-test", "answers": answers})
+    g = gather("SEI타워 관련 문서 전부", desk, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
+    assert g.status == "complete"
+    assert sorted((f.card.label, "/".join(f.path)) for f in g.documents) == [("SEI타워_렌트롤_2019", "업무/렌트롤"), ("임대차계약서_SEI타워_21층", "업무/계약서")]
+    assert [f.card.label for f in g.maybe] == ["전대차계약서_일산GLC"]          # topic matches, not the target — offered, not asserted
+    assert [p for p, _ in g.folders] == [["업무"], ["업무", "계약서"], ["업무", "렌트롤"]] and g.pruned_folders == 1   # 개인 never entered
+    assert g.calls == 4                                                         # root, 업무, 계약서, 렌트롤 — one model call per node page

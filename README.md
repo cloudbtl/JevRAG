@@ -86,6 +86,21 @@ The walker never sees bodies: node cards carry counts, type mix, landed range an
 document cards carry title, type, page count, sheet names, metadata and a 120-char headline;
 enricher summaries (`card.*` under another producer) take precedence in the `summary` field.
 
+### Every relevant document — `jevrag gather`
+
+`walk` answers "which one"; `gather` answers "which ones". At every node it scores the same option cards, enters every
+folder that clears the bar (at most `--beam` per node, margin rule as in walk), keeps every document at or above 1.5,
+and returns documents scored 1.0–1.5 separately as *maybe* — offered, not asserted. It stops when the frontier is empty
+or `--max-calls` model calls (about a second each) are spent; the result says which and how many folders were pruned.
+
+```bash
+jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 프로젝트 관련 문서" --max-calls 30
+# complete · 13 calls · 2 documents, 11 maybe · folders entered 5, pruned 78
+#   1.69  estimate/all_estimate_items_analysis
+#   1.52  /quotations
+#   maybe: 1.48 estimate/db_quote_line_items · 1.26 KMI-제안-샘플/03_견적/견적_메모 · …
+```
+
 ## Nightly card enricher (local LLM)
 
 Baseline cards are deterministic headers. `jevrag enrich-cards` adds the one-line *content* summary a

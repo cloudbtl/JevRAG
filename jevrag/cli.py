@@ -1,4 +1,4 @@
-"""jevrag CLI — options / ask / walk / file / watch / seed-trees / enrich-cards / replay."""
+"""jevrag CLI — options / ask / walk / gather / file / watch / seed-trees / enrich-cards / replay."""
 from __future__ import annotations
 
 import argparse
@@ -40,6 +40,10 @@ def main(argv=None) -> int:
     w = sub.add_parser("walk", help="walk a CloudBTL tree hop by hop until a document (or page) is chosen")
     w.add_argument("question"); w.add_argument("--tree", default="folders"); w.add_argument("--start", default="root")
     w.add_argument("--max-hops", type=int, default=6); w.add_argument("--fan-out", type=int, default=20); w.add_argument("--pages", action="store_true")
+    g = sub.add_parser("gather", help="every document relevant to a question — follow every folder that clears the bar, keep every document that does")
+    g.add_argument("question"); g.add_argument("--tree", default="folders"); g.add_argument("--start", default="root")
+    g.add_argument("--fan-out", type=int, default=20); g.add_argument("--beam", type=int, default=5, help="folders entered per node at most")
+    g.add_argument("--max-calls", type=int, default=40, help="model calls (about a second each) to spend"); g.add_argument("--json", action="store_true")
     e = sub.add_parser("enrich-cards", help="write llm-cards card.doc/card.node summaries with a local Ollama model")
     e.add_argument("--limit", type=int, default=300); e.add_argument("--model", default=None); e.add_argument("--refresh", action="store_true")
     e.add_argument("--max-minutes", type=float, default=300); e.add_argument("--no-nodes", action="store_true"); e.add_argument("--log", default=None)
@@ -84,6 +88,23 @@ def main(argv=None) -> int:
         print(json.dumps({"status": res.status, "path": res.path, "target": (res.target.for_model() | {"id": res.target.id}) if res.target else None,
                           "hops": [{"at": h.at.get("label"), "source": h.source, "top": h.ranked[:3], "jev_ms": h.jev.elapsed_ms if h.jev else None} for h in res.hops]},
                          ensure_ascii=False, indent=2)); return 0
+    if ns.cmd == "gather":
+        from .gather import gather
+        g_ = gather(ns.question, source(), tree=ns.tree, start=ns.start, fan_out=ns.fan_out, beam=ns.beam, max_calls=ns.max_calls)
+        def row(f):
+            return {"id": f.card.id, "label": f.card.label, "score": round(f.score, 2), "confidence": round(f.confidence, 2), "path": "/".join(f.path), "facts": f.card.facts}
+        out = {"status": g_.status, "calls": g_.calls, "documents": [row(f) for f in g_.documents], "maybe": [row(f) for f in g_.maybe],
+               "folders": [{"path": "/".join(p), "score": round(s_, 2)} for p, s_ in g_.folders], "pruned_folders": g_.pruned_folders, "below": g_.below}
+        if ns.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2)); return 0
+        print(f"{g_.status} · {g_.calls} calls · {len(g_.documents)} documents, {len(g_.maybe)} maybe · folders entered {len(g_.folders)}, pruned {g_.pruned_folders}")
+        for f in g_.documents:
+            print(f"  {f.score:4.2f}  {'/'.join(f.path)}/{f.card.label}")
+        if g_.maybe:
+            print("  maybe:")
+            for f in g_.maybe[:10]:
+                print(f"  {f.score:4.2f}  {'/'.join(f.path)}/{f.card.label}")
+        return 0
     if ns.cmd == "enrich-cards":
         from .enrich_cards import CardEnricher, Ollama, DEFAULT_MODEL
         logf = open(ns.log, "a", encoding="utf-8") if ns.log else None
