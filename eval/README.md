@@ -1,5 +1,12 @@
 # Evaluation
 
+## Design principles
+
+- Build the reference evidence set independently of the retriever being scored.
+- Keep candidate generation, decision quality and final answer quality as separate measurements.
+- Reuse the same questions and source snapshot when comparing changes.
+- Treat missing evidence and unjustified completeness claims as failures, even when the answer sounds plausible.
+
 Three measurements, each reviewed by a person independent of the pipeline author:
 
 1. **Missing-evidence rate** — share of answers whose evidence set lacks a document a reviewer deems necessary.

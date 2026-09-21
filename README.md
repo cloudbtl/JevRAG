@@ -3,7 +3,7 @@
 **Option-ready retrieval for decision models.** A reference implementation that pairs
 [TypeSafe AI's Jev](https://docs.typesafe.ai/) (a *System One* / decision foundation model that
 answers typed questions — `choice`, `score`, `noul` — over a state you provide) with the
-[CloudBTL landing layer](https://github.com/cloudbtl/cloudbtl-site/blob/main/docs/spec/landing-layer.md)
+[CloudBTL landing layer](https://cloudbtl.com)
 (documents stored with structured, versioned, provenance-carrying *descriptors*).
 
 The premise: a decision model is fast, cheap and auditable **only when it is given well-described
@@ -15,6 +15,15 @@ question ─▶ build option cards (CloudBTL descriptors) ─▶ Jev chooses sou
         ─▶ code executes (lookup · filter · count · compare on structured fields)
         ─▶ answer with page-level provenance ─▶ decision log (for review & improvement)
 ```
+
+## Design principles
+
+- **Describe before deciding.** Retrieval quality starts with compact option cards that state contents, conditions, coverage and provenance.
+- **The model chooses; code executes.** Jev selects sources and actions, while deterministic code performs lookup, filter, count and compare.
+- **Abstention is a result.** Low scores and missing conditions produce `insufficient_options` or clarification instead of a forced best guess.
+- **Trees are views, not truth.** Folder, facet and memory trees can coexist over the same immutable documents.
+- **Domain meaning is injected.** Departments, terms, memory layers and filing rules come from deployment configuration, never from the engine.
+- **Every decision is reviewable.** Logs preserve offered options, scores, actions and evidence; human moves override and pin automated filing.
 
 ## Why not just RAG
 
@@ -46,7 +55,7 @@ jevrag options prop_abc123                       # see the option card CloudBTL 
 jevrag ask "average unit price for staffing agencies in our quotes"
 jevrag ask "which contracts expire within 6 months" --scope batch_2026_09
 jevrag replay decisions.jsonl                     # re-run logged questions against current descriptors
-jevrag walk "which rent roll has SEI tower tenants"  # hop through a CloudBTL tree (see below)
+jevrag walk "which rent roll contains Tower A tenants"  # hop through a CloudBTL tree (see below)
 ```
 
 ```python
@@ -72,13 +81,13 @@ nothing scores ≥ 2, or after `--max-hops`. Twenty options × six hops covers 2
 model only ever sees twenty cards.
 
 ```bash
-jevrag walk "SEI타워 임차인별 보증금과 임대료" --tree folders --fan-out 20 --max-hops 6
-# → path ["[LM]", "[기타자료]", "(구)Jason 자료", "LR", "Leasing", "끝", "SEI타워", "퍼스텝16호_Rent Roll…"]
+jevrag walk "Tower A tenant deposits and rent" --tree folders --fan-out 20 --max-hops 6
+# → path ["Real Estate", "Leasing", "Tower A", "Rent Roll 2026-03"]
 ```
 
 ```python
 from jevrag import CloudBTL, walk
-w = walk("SEI타워 임차인별 보증금과 임대료", CloudBTL())
+w = walk("Tower A tenant deposits and rent", CloudBTL())
 w.path, w.status, w.target.id      # labels chosen per hop · document|page|leaf|insufficient_options|max_hops · prop_…
 ```
 
@@ -94,11 +103,11 @@ and returns documents scored 1.0–1.5 separately as *maybe* — offered, not as
 or `--max-calls` model calls (about a second each) are spent; the result says which and how many folders were pruned.
 
 ```bash
-jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 프로젝트 관련 문서" --max-calls 30
+jevrag --local ~/Documents/Workspace gather "documents related to quote automation" --max-calls 30
 # complete · 13 calls · 2 documents, 11 maybe · folders entered 5, pruned 78
 #   1.69  estimate/all_estimate_items_analysis
 #   1.52  /quotations
-#   maybe: 1.48 estimate/db_quote_line_items · 1.26 KMI-제안-샘플/03_견적/견적_메모 · …
+#   maybe: 1.48 estimate/db_quote_line_items · 1.26 proposal-sample/quotes/notes · …
 ```
 
 ### Let Jev choose the card fields
@@ -106,7 +115,7 @@ jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 프로젝트 관
 Cards can become noisy when every descriptor is unfolded at every hop. `--fields auto` first gives Jev the available field families and their coverage, then uses its selected profile for the walk or gather. Labels, document type, summary and document counts remain a fixed base so the field-selection step cannot hide the only useful branch.
 
 ```bash
-jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 관련 문서" --fields auto
+jevrag --local ~/Documents/Workspace gather "documents related to quote automation" --fields auto
 jevrag walk "2026년 3월 렌트롤" --tree folders --fields docType,period,entities
 ```
 
@@ -141,10 +150,13 @@ card is the question, the options at each hop are the child folders plus **여�
 people can review, move and pin — human moves pin the document and Jev never moves it again.
 
 ```bash
-jevrag seed-trees                                  # memory (도메인→주제) and filed (도메인 folders with a written description)
+jevrag seed-trees                                  # generic memory and filed skeletons
+jevrag seed-trees --skeleton ./company-skeleton.json  # deployment-specific domains and topics
 jevrag file --tree filed --group-by-folder --limit 300 --log file.jsonl   # queue = GET /documents?notInTree=filed
 jevrag file --tree filed --node <folders node id> --dry-run              # one source folder, no writes
 ```
+
+The skeleton JSON owns domain names, descriptions, topics and the optional company-wide inheritance root; see [`examples/company-skeleton.json`](examples/company-skeleton.json). Memory layers are metadata, not folders, so the same item can retain its epistemic role without being trapped under one department.
 
 Rules learned from the first live runs (the log names them in `hops[].source`):
 
@@ -162,7 +174,7 @@ extensions, sizes, modified times, subtree counts, plus cheap facts read from th
 pptx slide count, Office titles, PDF page count) and the first line of small text files. No bytes of body text.
 
 ```bash
-jevrag --local ~/Documents walk "SEI타워 렌트롤"                 # same hops, same Jev questions, ~0.6 s each
+jevrag --local ~/Documents walk "Tower A rent roll"             # same hops and decision questions
 jevrag --local ~/Documents file --log ~/Documents/.jevrag/file.jsonl   # queue = ~/Documents/_inbox → files are moved on disk
 jevrag --local ~/Documents --inbox ~/Downloads file --dry-run    # any folder can be the inbox
 ```
@@ -177,7 +189,7 @@ folders (never hold files directly, get a written description) are declared in `
 
 Folders that hold a `.git` are places to search, never filing destinations; `"no_filing": ["테스트*"]` in the config hides
 more, and `"descriptions": {"자료": "…"}` gives any folder the one line the model reads. An inbox above the root (root
-`~/Desktop/Desktopped`, inbox `~/Desktop`) is read at its top level only, so the root and sibling folders are never swept.
+`~/Documents/Workspace`, inbox `~/Downloads`) is read at its top level only, so the root and sibling folders are never swept.
 
 A local enricher (Ollama, say) can write cards to `.jevrag/cards.jsonl` through the same `put_descriptors`; hops show
 them next to the baseline. Where things live, laptop to lake:
@@ -215,7 +227,7 @@ again for `--retry-after` seconds (3600) — its card may get richer meanwhile. 
 2. **Option cards** — `options.build_card()` turns that into a compact, *masked* card: title, document
    type, what it contains (kinds present), conditions (dates, currency, VAT flag when present),
    coverage (pages, has text layer), and a one-line description. **Nothing else leaves the boundary**:
-   no raw bodies, no URLs, no credentials (same rule as the Company Brain reranker that inspired this).
+   no raw bodies, no URLs and no credentials.
 3. **Decide** — `decide.py` asks Jev small, atomic questions:
    - `score` each card 0–3 on "usefulness for answering this question" (rubric in `RUBRICS`)
    - `choice` the action: `lookup` · `filter` · `count` · `compare` · `open` · `clarify` · `none`

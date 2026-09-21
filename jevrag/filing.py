@@ -92,14 +92,14 @@ class Namer:
         """depth = the new folder's depth. 1~2 = subject folders (건물·프로젝트·브랜드·업무), deeper = document kinds."""
         if self.llm is None:
             return self.fallback(question)
-        level = ("건물·프로젝트·업무 단위(예: 더갤러리832, SEI타워, 에버랜드 팝업). 문서 종류(계약서·의향서)나 입점 브랜드명으로 짓지 않는다. "
-                 "문서 경로에 건물·프로젝트 폴더명이 있으면 그것을 쓴다(예: '#260220 더갤러리832' → '더갤러리832')." if depth <= 2
+        level = ("건물·프로젝트·업무 단위(예: Alpha타워, Aurora 프로젝트, 봄 캠페인). 문서 종류(계약서·의향서)나 입점 브랜드명으로 짓지 않는다. "
+                 "문서 경로에 건물·프로젝트 폴더명이 있으면 그것을 쓴다(예: '#260220 Aurora 프로젝트' → 'Aurora 프로젝트')." if depth <= 2
                  else "문서 종류 단위(예: 임대차계약서, 입점의향서, IM, 렌트롤, 견적서). 한 문서가 아니라 같은 부류가 모일 이름.")
         schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
         try:
             out = self.llm.json(
                 "너는 회사 문서 폴더의 이름을 짓는 사서다. 짧고(2~6단어) 형제 폴더와 같은 결의 한국어 이름을 짓는다. "
-                "날짜·버전·날인 여부·회사명 접두어([Sweetspot], 스위트스팟)는 넣지 않는다. 형제 폴더 중 같은 대상을 가리키는 이름이 있으면 그 이름을 글자 그대로 돌려준다. JSON 만.",
+                "날짜·버전·날인 여부·회사명 접두어는 넣지 않는다. 형제 폴더 중 같은 대상을 가리키는 이름이 있으면 그 이름을 글자 그대로 돌려준다. JSON 만.",
                 f"상위 폴더: {parent}\n형제 폴더: {', '.join(siblings[:12]) or '(없음)'}\n이 층의 폴더 이름 기준: {level}\n넣을 문서:\n{question}\n\n이 문서가 들어갈 폴더 이름 하나를 JSON 으로: name",
                 schema,
             )
@@ -145,7 +145,7 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
                      "chosen": hop.chosen.id if hop.chosen else None, "source": hop.source, "jev_ms": hop.jev.elapsed_ms if hop.jev else None})
         ch = hop.chosen
         if ch is None and folders:
-            # a folder whose name sits inside the document title (계약서 ⊂ 임대차계약서_더갤러리832) is where a person would go
+            # A folder whose name sits inside the document title (contract ⊂ lease_contract_Aurora) is where a person would go.
             title_n = _norm(doc.get("title") or "")
             hit = [f for f in folders if len(_norm(f.label)) >= 2 and _norm(f.label) in title_n]
             if len(hit) == 1:

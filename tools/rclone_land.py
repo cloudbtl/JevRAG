@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Land an rclone remote (OneDrive, Google Drive, S3, SMB…) into CloudBTL — streaming, resumable, no local copy.
 
-    rclone_land.py --remote 'onedrive:[LM]' --source onedrive --metadata '{"division":"LM"}' \
-                   --state ~/jevrag-cron/land-LM.json --log ~/jevrag-cron/land-LM.jsonl [--limit 500] [--dry-run]
+    rclone_land.py --remote 'onedrive:Operations' --source onedrive --metadata '{"domain":"operations"}' \
+                   --state ~/.local/state/jevrag/land.json --log ~/.local/state/jevrag/land.jsonl [--limit 500] [--dry-run]
 
 For every file under the remote path (recursively) that is not yet in the state file: read it with
 `rclone cat`, pack files into requests under 30MB / 50 files, POST /api/documents/land with
@@ -109,7 +109,7 @@ def key_of(f: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--remote", required=True, help="rclone remote path, e.g. onedrive:[LM]")
+    ap.add_argument("--remote", required=True, help="rclone remote path, e.g. onedrive:Operations")
     ap.add_argument("--prefix", default=None, help="sourceRef prefix (default: the remote path after ':')")
     ap.add_argument("--source", default="rclone")
     ap.add_argument("--metadata", default="{}")

@@ -16,7 +16,7 @@ from jevrag.filing import file_document, Namer
 def _xlsx(path: Path, sheets):
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("xl/workbook.xml", '<workbook><sheets>' + "".join(f'<sheet name="{s}" sheetId="{i+1}"/>' for i, s in enumerate(sheets)) + '</sheets></workbook>')
-        z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:dc="x"><dc:title>SEI Rent Roll</dc:title></cp:coreProperties>')
+        z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:dc="x"><dc:title>Alpha Rent Roll</dc:title></cp:coreProperties>')
 
 
 def _pptx(path: Path, n):
@@ -31,11 +31,11 @@ def desk(tmp_path: Path):
     (tmp_path / "업무" / "렌트롤").mkdir()
     (tmp_path / "개인" / "영수증").mkdir(parents=True)
     (tmp_path / "_inbox").mkdir()
-    (tmp_path / "업무" / "계약서" / "전대차계약서_일산GLC.md").write_text("# 일산 GLC 전대차 계약서\n임대인 이지스\n", encoding="utf-8")
-    _xlsx(tmp_path / "업무" / "렌트롤" / "SEI타워_렌트롤_2019.xlsx", ["RentRoll_SEI", "층별"])
-    _pptx(tmp_path / "업무" / "IM_더갤러리832.pptx", 12)
+    (tmp_path / "업무" / "계약서" / "전대차계약서_Alpha센터.md").write_text("# Alpha센터 전대차 계약서\n임대인 Example Asset\n", encoding="utf-8")
+    _xlsx(tmp_path / "업무" / "렌트롤" / "Alpha타워_렌트롤_2019.xlsx", ["RentRoll_Alpha", "층별"])
+    _pptx(tmp_path / "업무" / "IM_Aurora센터.pptx", 12)
     (tmp_path / "개인" / "영수증" / "스타벅스.jpg").write_bytes(b"x")
-    (tmp_path / "_inbox" / "임대차계약서_더갤러리832_초안.md").write_text("# 더갤러리832 임대차 계약서 초안\n", encoding="utf-8")
+    (tmp_path / "_inbox" / "임대차계약서_Aurora센터_초안.md").write_text("# Aurora센터 임대차 계약서 초안\n", encoding="utf-8")
     (tmp_path / "_inbox" / "편의점_영수증.jpg").write_bytes(b"x")
     (tmp_path / ".jevrag").mkdir()
     (tmp_path / ".jevrag" / "config.json").write_text(json.dumps({"domains": {"업무": "회사 자료 — 계약·렌트롤·IM", "개인": "개인 자료 — 영수증·사진"}}, ensure_ascii=False), encoding="utf-8")
@@ -54,7 +54,7 @@ def test_options_have_the_cloudbtl_shape_and_the_inbox_is_not_a_hop(desk: LocalT
     # inside 업무: folders first, then the loose pptx with slide count from the zip directory
     hop = desk.options(at="node:업무", limit=20)
     kinds = [(o["kind"], o["label"]) for o in hop["options"]]
-    assert kinds == [("node", "계약서"), ("node", "렌트롤"), ("document", "IM_더갤러리832")]
+    assert kinds == [("node", "계약서"), ("node", "렌트롤"), ("document", "IM_Aurora센터")]
     im = hop["options"][2]["cards"][0]["payload"]
     assert im["pageCount"] == 12 and im["documentType"] == "pptx" and "hasText" not in im
     # hop cards read the local baseline like the server one
@@ -63,9 +63,9 @@ def test_options_have_the_cloudbtl_shape_and_the_inbox_is_not_a_hop(desk: LocalT
 
 
 def test_cheap_facts_read_sheet_names_and_titles_without_the_body(tmp_path: Path):
-    p = tmp_path / "rr.xlsx"; _xlsx(p, ["RentRoll_SEI", "층별"])
+    p = tmp_path / "rr.xlsx"; _xlsx(p, ["RentRoll_Alpha", "층별"])
     f = cheap_facts(p, p.stat().st_size)
-    assert f == {"pageLabels": ["RentRoll_SEI", "층별"], "pageCount": 2, "docTitle": "SEI Rent Roll"}
+    assert f == {"pageLabels": ["RentRoll_Alpha", "층별"], "pageCount": 2, "docTitle": "Alpha Rent Roll"}
     md = tmp_path / "a.md"; md.write_text("# 제목\n본문", encoding="utf-8")
     assert cheap_facts(md, 10) == {}
 
@@ -75,9 +75,9 @@ def test_walk_over_the_desk_reaches_the_rent_roll(desk: LocalTree):
         body = json.loads(request.content); cands = body["state"]["candidates"]
         answers = {f"q{i}": {"type": "score", "score": 3 if ("렌트롤" in c["label"] or "업무" == c["label"]) else 0, "confidence": 0.8} for i, c in enumerate(cands)}
         return httpx.Response(200, json={"model": "jev-test", "answers": answers})
-    w = walk("SEI타워 렌트롤", desk, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
-    assert w.status == "document" and w.path == ["업무", "렌트롤", "SEI타워_렌트롤_2019"] and w.target.id == "doc:업무/렌트롤/SEI타워_렌트롤_2019.xlsx"
-    assert w.target.facts["sheets"] == "RentRoll_SEI; 층별"
+    w = walk("Alpha타워 렌트롤", desk, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
+    assert w.status == "document" and w.path == ["업무", "렌트롤", "Alpha타워_렌트롤_2019"] and w.target.id == "doc:업무/렌트롤/Alpha타워_렌트롤_2019.xlsx"
+    assert w.target.facts["sheets"] == "RentRoll_Alpha; 층별"
 
 
 def test_filing_moves_files_on_disk_writes_the_ledger_and_respects_a_human_pin(desk: LocalTree):
@@ -100,26 +100,26 @@ def test_filing_moves_files_on_disk_writes_the_ledger_and_respects_a_human_pin(d
     root = desk.root
     assert not any(root.joinpath("_inbox").iterdir())
     assert (root / "개인" / "영수증" / "편의점_영수증.jpg").exists()
-    assert (root / "업무" / "계약서" / "임대차계약서_더갤러리832_초안.md").exists()
+    assert (root / "업무" / "계약서" / "임대차계약서_Aurora센터_초안.md").exists()
     ledger = desk.ledger()
     assert {r["by"] for r in ledger} == {"jev"} and all(r["event"] == "move" for r in ledger)
     # the desk stats follow the move
     assert desk.options(at="node:업무/계약서")["card"]["docCountTotal"] == 2
     # a person moves the draft to 렌트롤 → pinned; Jev may not move it back
-    r = desk.move("folders", "doc:업무/계약서/임대차계약서_더갤러리832_초안.md", None, "업무/렌트롤", by="human", reason="review")
-    assert r["pinned"] is True and (root / "업무" / "렌트롤" / "임대차계약서_더갤러리832_초안.md").exists()
-    again = desk.move("folders", "doc:업무/렌트롤/임대차계약서_더갤러리832_초안.md", None, "업무/계약서", by="jev")
-    assert again == {"ok": False, "code": "pinned", "path": "업무/렌트롤/임대차계약서_더갤러리832_초안.md"}
+    r = desk.move("folders", "doc:업무/계약서/임대차계약서_Aurora센터_초안.md", None, "업무/렌트롤", by="human", reason="review")
+    assert r["pinned"] is True and (root / "업무" / "렌트롤" / "임대차계약서_Aurora센터_초안.md").exists()
+    again = desk.move("folders", "doc:업무/렌트롤/임대차계약서_Aurora센터_초안.md", None, "업무/계약서", by="jev")
+    assert again == {"ok": False, "code": "pinned", "path": "업무/렌트롤/임대차계약서_Aurora센터_초안.md"}
     opt = next(o for o in desk.options(at="node:업무/렌트롤")["options"] if o["kind"] == "document" and "초안" in o["label"])
     assert opt["document"]["placedBy"] == "human" and opt["document"]["pinned"] is True
 
 
 def test_repos_are_searchable_but_never_filing_destinations_and_an_inbox_above_the_root_does_not_sweep_it(tmp_path: Path):
-    root = tmp_path / "Desktopped"; (root / "finance-ax" / ".git").mkdir(parents=True); (root / "자료").mkdir()
+    root = tmp_path / "Workspace"; (root / "finance-ax" / ".git").mkdir(parents=True); (root / "자료").mkdir()
     (root / "finance-ax" / "README.md").write_text("# finance", encoding="utf-8")
     (root / ".jevrag").mkdir(); (root / ".jevrag" / "config.json").write_text(json.dumps({"no_filing": ["테스트*"], "descriptions": {"자료": "문서·표·자료"}}), encoding="utf-8")
     (root / "테스트").mkdir()
-    (tmp_path / "AX_회수시간.xlsx").write_bytes(b"x")                 # lying on the desk (= inbox), next to Desktopped
+    (tmp_path / "AX_회수시간.xlsx").write_bytes(b"x")                 # lying on the desk (= inbox), next to Workspace
     (tmp_path / "CompanyBrain").mkdir(); (tmp_path / "CompanyBrain" / "HANDOFF.md").write_text("x", encoding="utf-8")
     desk = LocalTree(root, inbox=tmp_path)
     # queue = top-level files of the inbox only: not the root's own files, not other folders on the desk
@@ -145,19 +145,19 @@ def test_put_descriptors_replace_per_producer_and_show_up_in_hops(desk: LocalTre
 
 def test_gather_brings_every_matching_document_across_folders(desk: LocalTree):
     from jevrag.gather import gather
-    (desk.root / "업무" / "계약서" / "임대차계약서_SEI타워_21층.pdf").write_bytes(b"x")
+    (desk.root / "업무" / "계약서" / "임대차계약서_Alpha타워_21층.pdf").write_bytes(b"x")
     desk.invalidate()
     def jev_handler(request: httpx.Request):
         body = json.loads(request.content); cands = body["state"]["candidates"]
         def score(c):
             if c["kind"] == "node":
                 return 3 if c["label"] in ("업무", "렌트롤", "계약서") else 0
-            return 3 if "SEI" in c["label"] else (1 if "계약" in c["label"] else 0)
+            return 3 if "Alpha타워" in c["label"] else (1 if "계약" in c["label"] else 0)
         answers = {f"q{i}": {"type": "score", "score": score(c), "confidence": 0.7} for i, c in enumerate(cands)}
         return httpx.Response(200, json={"model": "jev-test", "answers": answers})
-    g = gather("SEI타워 관련 문서 전부", desk, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
+    g = gather("Alpha타워 관련 문서 전부", desk, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
     assert g.status == "complete"
-    assert sorted((f.card.label, "/".join(f.path)) for f in g.documents) == [("SEI타워_렌트롤_2019", "업무/렌트롤"), ("임대차계약서_SEI타워_21층", "업무/계약서")]
-    assert [f.card.label for f in g.maybe] == ["전대차계약서_일산GLC"]          # topic matches, not the target — offered, not asserted
+    assert sorted((f.card.label, "/".join(f.path)) for f in g.documents) == [("Alpha타워_렌트롤_2019", "업무/렌트롤"), ("임대차계약서_Alpha타워_21층", "업무/계약서")]
+    assert [f.card.label for f in g.maybe] == ["전대차계약서_Alpha센터"]          # topic matches, not the target — offered, not asserted
     assert [p for p, _ in g.folders] == [["업무"], ["업무", "계약서"], ["업무", "렌트롤"]] and g.pruned_folders == 1   # 개인 never entered
     assert g.calls == 4                                                         # root, 업무, 계약서, 렌트롤 — one model call per node page

@@ -1,0 +1,18 @@
+{
+  "global_domain": "Company-wide",
+  "layers": ["charter", "knowledge", "cheatsheet", "digest"],
+  "domains": {
+    "Company-wide": {
+      "description": "Definitions and policies shared across the organization.",
+      "topics": ["Definitions", "Policies", "Terminology"]
+    },
+    "Operations": {
+      "description": "Projects, vendors, delivery and operating results.",
+      "topics": ["Projects", "Contracts", "Vendors", "Results"]
+    },
+    "Finance": {
+      "description": "Revenue, cost, settlement and budgets.",
+      "topics": ["Revenue & cost", "Settlement", "Budget"]
+    }
+  }
+}

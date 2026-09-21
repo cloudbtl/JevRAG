@@ -63,11 +63,11 @@ def test_watch_files_after_settle_skips_partials_and_defers_undecided(tmp_path: 
     res = w.cycle()
     assert [p.status for p in res] == ["undecided"]         # asked again, same answer, deferred again
     # a contract dropped later goes to 업무/계약서 after settling; the log carries every placement
-    (inbox / "임대차계약서_SEI.pdf").write_bytes(b"z")
+    (inbox / "임대차계약서_ALPHA.pdf").write_bytes(b"z")
     assert w.cycle() == []
     now[0] += 4
     res = w.cycle()
-    assert [p.path for p in res] == ["업무/계약서"] and (tmp_path / "업무" / "계약서" / "임대차계약서_SEI.pdf").exists()
+    assert [p.path for p in res] == ["업무/계약서"] and (tmp_path / "업무" / "계약서" / "임대차계약서_ALPHA.pdf").exists()
     assert [r["status"] for r in logs].count("placed") == 2
     # run(once=True) is one cycle; the launchd plist points at this interpreter and the same arguments
     st = w.run(once=True)

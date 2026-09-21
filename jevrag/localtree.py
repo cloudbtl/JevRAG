@@ -380,7 +380,7 @@ class LocalTree:
         it = base.rglob("*") if recursive else base.iterdir()
         inbox_inside_root = base == self.root or self.root in base.parents
         files = [f for f in it if f.is_file() and not self._skip(f.name) and ".jevrag" not in f.parts
-                 and (inbox_inside_root or self.root not in f.resolve().parents)]   # an inbox above the root (~/Desktop ⊃ Desktopped) must not sweep the root itself
+                 and (inbox_inside_root or self.root not in f.resolve().parents)]   # an inbox above the root must not sweep the root itself
         files.sort(key=lambda f: (-f.stat().st_mtime, f.name))
         out = []
         for f in files[:limit]:
@@ -473,4 +473,3 @@ class LocalTree:
             return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
         except (OSError, ValueError):
             return []
-

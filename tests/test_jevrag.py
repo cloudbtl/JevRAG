@@ -83,13 +83,13 @@ def _tree_handler(request: httpx.Request):
                 "cards": [{"producer": "cloudbtl-baseline", "producerVersion": "1.2.0", "payload": {"docCountTotal": docs, "byType": {"xlsx": docs}, "sampleTitles": sample}}]}
     def doc(id_, title, headline, extra=None):
         return {"kind": "document", "id": id_, "label": title, "weight": 1, "document": {"documentType": "xlsx", "fileSize": 1, "createdAt": "2026-09-21", "sourceRef": None},
-                "cards": [{"producer": "cloudbtl-baseline", "producerVersion": "1.2.0", "payload": {"pageCount": 7, "hasText": True, "headline": headline, "snippet": "SECRET http://x.test/leak", "pageLabels": ["RentRoll_SEI타워"]}}] + (extra or [])}
+                "cards": [{"producer": "cloudbtl-baseline", "producerVersion": "1.2.0", "payload": {"pageCount": 7, "hasText": True, "headline": headline, "snippet": "SECRET http://x.test/leak", "pageLabels": ["RentRoll_Alpha타워"]}}] + (extra or [])}
     if at == "root":
-        options = [node("node_lm", "LM", 40, ["SEI타워 rent roll", "임대차 계약서"]), node("node_pm", "PM", 30, ["팝업 결과보고"])]
+        options = [node("node_lm", "Real Estate", 40, ["Alpha타워 rent roll", "임대차 계약서"]), node("node_pm", "Campaigns", 30, ["팝업 결과보고"])]
     elif at == "node_lm":
-        options = [node("node_sei", "SEI타워", 17, ["퍼스텝16호 Rent Roll"]), node("node_gn", "강남", 5, ["플라이어"])]
-    elif at == "node_sei":
-        options = [doc("prop_rr", "퍼스텝16호 Rent Roll 20191130", "RentRoll_SEI타워 기준일", [{"producer": "llm-cards", "producerVersion": "0.1", "payload": {"summary": "SEI타워 임차인별 보증금·임대료 rent roll"}}]),
+        options = [node("node_alpha", "Alpha타워", 17, ["Suite 1601 Rent Roll"]), node("node_gn", "강남", 5, ["플라이어"])]
+    elif at == "node_alpha":
+        options = [doc("prop_rr", "Suite 1601 Rent Roll 20191130", "RentRoll_Alpha타워 기준일", [{"producer": "llm-cards", "producerVersion": "0.1", "payload": {"summary": "Alpha타워 임차인별 보증금·임대료 rent roll"}}]),
                    doc("prop_x", "기타", "메모")]
     else:
         options = []
@@ -100,13 +100,13 @@ def test_walk_heuristic_descends_to_the_rent_roll():
     from jevrag.cloudbtl import CloudBTL
     from jevrag.walk import walk, hop_cards
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(_tree_handler))
-    res = walk("SEI타워 rent roll 임대료 보증금", cb, Jev(api_key=""), fan_out=20)
+    res = walk("Alpha타워 rent roll 임대료 보증금", cb, Jev(api_key=""), fan_out=20)
     assert res.status == "document" and res.target.id == "prop_rr"
-    assert res.path == ["LM", "SEI타워", "퍼스텝16호 Rent Roll 20191130"]
+    assert res.path == ["Real Estate", "Alpha타워", "Suite 1601 Rent Roll 20191130"]
     # 모델이 보는 카드에는 enricher 요약이 우선하고 원문 발췌·URL 은 없다
     m = res.target.for_model()
     assert "보증금" in m["summary"] and "SECRET" not in json.dumps(m) and "http" not in json.dumps(m)
-    assert "sheets=RentRoll_SEI타워" in m["facts"]
+    assert "sheets=RentRoll_Alpha타워" in m["facts"]
 
 
 def test_walk_stops_when_nothing_scores():
@@ -126,14 +126,14 @@ def test_walk_with_jev_uses_scores_and_masks_state():
         seen.append(body)
         assert "SECRET" not in request.content.decode()
         cands = body["state"]["candidates"]
-        # 항상 두 번째 후보를 고른다 (PM → 강남 → 기타)
+        # 항상 두 번째 후보를 고른다 (Campaigns → stop)
         answers = {f"q{i}": {"type": "score", "score": 3 if i == 1 else 0, "confidence": 0.9} for i in range(len(cands))}
         return httpx.Response(200, json={"model": "jev-test", "answers": answers})
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(_tree_handler))
     res = walk("anything", cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
-    # PM 은 비어 있다 → 사람처럼 되돌아 나와(exhausted) 루트에서 다시 고른다; 두 번째 홉의 후보에 PM 은 없고 '멈춤'이 있다
+    # Campaigns는 비어 있다 → 사람처럼 되돌아 나와(exhausted) 루트에서 다시 고른다; 두 번째 홉에는 이미 본 폴더 대신 '멈춤'이 있다
     assert [h.source for h in res.hops] == ["jev", "jev"]
-    assert res.path[0] == "PM" and res.status == "stopped"
+    assert res.path[0] == "Campaigns" and res.status == "stopped"
     second = [c.id for c in res.hops[1].cards]
     assert "node_pm" not in second and "__stop__" in second and "node_lm" in second
     assert seen[0]["state"]["candidates"][0]["kind"] == "node"
@@ -152,16 +152,16 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
             listed.append(dict(request.url.params))
             if request.url.params.get("node"):
                 return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_rr", "title": "Rent Roll"}], "nextCursor": None})
-            return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_rr", "title": "Rent Roll", "originalFilename": "rr.xlsx", "documentType": "xlsx", "sourceRef": "LM/SEI/rr.xlsx", "metadata": {"division": "LM"}}], "nextCursor": None})
+            return httpx.Response(200, json={"ok": True, "documents": [{"id": "prop_rr", "title": "Rent Roll", "originalFilename": "rr.xlsx", "documentType": "xlsx", "sourceRef": "RealEstate/Alpha/rr.xlsx", "metadata": {"division": "real-estate"}}], "nextCursor": None})
         if p == "/api/proposals/prop_rr/descriptors":
             if request.method == "PUT":
                 puts.append(("doc", json.loads(request.content))); return httpx.Response(200, json={"ok": True, "written": 1, "kinds": ["card.doc"]})
-            rows = [{"kind": "card.doc", "page": 0, "producer": "cloudbtl-baseline", "payload": {"pageCount": 2, "pageLabels": ["RentRoll_SEI", "층별"], "headline": "SEI 렌트롤"}},
+            rows = [{"kind": "card.doc", "page": 0, "producer": "cloudbtl-baseline", "payload": {"pageCount": 2, "pageLabels": ["RentRoll_Alpha", "층별"], "headline": "ALPHA 렌트롤"}},
                     {"kind": "text.page", "page": 2, "producer": "cloudbtl-baseline", "payload": {"text": "층별 현황 SECRET-2"}},
-                    {"kind": "text.page", "page": 1, "producer": "cloudbtl-baseline", "payload": {"text": "삼성전자 21층 보증금 196,957,000 임대료 20,894,500"}}]
+                    {"kind": "text.page", "page": 1, "producer": "cloudbtl-baseline", "payload": {"text": "Tenant A 21층 보증금 196,957,000 임대료 20,894,500"}}]
             if request.url.params.get("producer") == "cloudbtl-baseline" or not request.url.params.get("kind"):
                 return httpx.Response(200, json={"ok": True, "descriptors": rows})
-            return httpx.Response(200, json={"ok": True, "descriptors": [r for r in rows if r["kind"] == request.url.params.get("kind")] + [{"kind": "card.doc", "page": 0, "producer": PRODUCER, "payload": {"summary": "SEI타워 렌트롤"}}]})
+            return httpx.Response(200, json={"ok": True, "descriptors": [r for r in rows if r["kind"] == request.url.params.get("kind")] + [{"kind": "card.doc", "page": 0, "producer": PRODUCER, "payload": {"summary": "Alpha타워 렌트롤"}}]})
         if p == "/api/trees":
             return httpx.Response(200, json={"ok": True, "trees": [{"key": "folders", "id": "tree_1"}]})
         if p == "/api/options":
@@ -175,8 +175,8 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
                                                              # 요약 당시 2개였는데 지금 40개 — 낡은 카드라 다시 쓴다
                                                              {"kind": "node", "id": "node_stale", "label": "stale", "node": {"docCountTotal": 40}, "cards": [{"producer": PRODUCER, "payload": {"summary": "old", "basis": {"docs": 2}}}]}], "totals": {}, "nextOffset": None})
             if at == "node_stale":
-                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_stale", "label": "stale", "path": "LM/stale", "depth": 2}, "card": {"docCountTotal": 40}, "options": [], "totals": {}, "nextOffset": None})
-            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_done", "label": "done", "path": "LM/done", "depth": 2}, "card": {"docCountTotal": 1}, "options": [], "totals": {}, "nextOffset": None})
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_stale", "label": "stale", "path": "Operations/stale", "depth": 2}, "card": {"docCountTotal": 40}, "options": [], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_done", "label": "done", "path": "Operations/done", "depth": 2}, "card": {"docCountTotal": 1}, "options": [], "totals": {}, "nextOffset": None})
         if p == "/api/nodes/node_root/descriptors" and request.method == "GET":
             return httpx.Response(200, json={"ok": True, "descriptors": []})
         if p.startswith("/api/nodes/") and request.method == "PUT":
@@ -188,8 +188,8 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
         prompts.append(body)
         assert body["format"]["type"] == "object" and body["think"] is False
         is_doc = "docType" in body["format"]["properties"]
-        content = {"summary": "SEI타워 21층 삼성전자 등 임차인별 보증금·임대료 렌트롤", "docType": "렌트롤", "topics": ["렌트롤", "보증금"], "entities": ["SEI타워", "삼성전자"], "period": "2019-11", "language": "ko"} if is_doc \
-            else {"summary": "SEI타워 임대 관리 자료(렌트롤·층별 현황)", "topics": ["임대"], "entities": ["SEI타워"], "period": "2019"}
+        content = {"summary": "Alpha타워 21층 Tenant A 등 임차인별 보증금·임대료 렌트롤", "docType": "렌트롤", "topics": ["렌트롤", "보증금"], "entities": ["Alpha타워", "Tenant A"], "period": "2019-11", "language": "ko"} if is_doc \
+            else {"summary": "Alpha타워 임대 관리 자료(렌트롤·층별 현황)", "topics": ["임대"], "entities": ["Alpha타워"], "period": "2019"}
         return httpx.Response(200, json={"message": {"role": "assistant", "content": json.dumps(content, ensure_ascii=False)}})
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(cb_handler))
     llm = Ollama(base="http://ollama.local", model="qwen-test:1b", transport=httpx.MockTransport(ollama_handler))
@@ -199,7 +199,7 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
     # 문서 선택은 서버 필터로 (missingProducer=llm-cards, kind=text.page)
     assert listed[0]["missingProducer"] == PRODUCER and listed[0]["kind"] == "text.page"
     # 문서 프롬프트는 페이지 순서대로 본문을 담고, 쓰기는 producer=llm-cards, version=모델 태그
-    assert prompts[0]["messages"][1]["content"].index("[p1 RentRoll_SEI]") < prompts[0]["messages"][1]["content"].index("[p2 층별]")
+    assert prompts[0]["messages"][1]["content"].index("[p1 RentRoll_Alpha]") < prompts[0]["messages"][1]["content"].index("[p2 층별]")
     kind, body = puts[0]
     assert kind == "doc" and body["producer"] == PRODUCER and body["producerVersion"] == "qwen-test-1b"
     assert body["items"][0]["kind"] == "card.doc" and body["items"][0]["payload"]["docType"] == "렌트롤" and body["items"][0]["payload"]["model"] == "qwen-test:1b"
@@ -210,7 +210,7 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
     stale_payload = next(b for k, b in puts if k == "node:node_stale")["items"][0]["payload"]
     assert stale_payload["basis"] == {"docs": 40, "children": 0}   # 다음 밤의 낡음 판정 기준
     node_prompt = prompts[1]["messages"][1]["content"]
-    assert "Rent Roll — SEI타워 렌트롤" in node_prompt   # 노드 요약은 안의 문서 카드를 본다
+    assert "Rent Roll — Alpha타워 렌트롤" in node_prompt   # 노드 요약은 안의 문서 카드를 본다
     assert all(r.get("summary") or r.get("error") for r in logs)
 
 
@@ -266,17 +266,17 @@ def _filing_tree_handler(moves: list, request: httpx.Request):
                     "cards": [{"producer": "cloudbtl-baseline", "payload": {"docCountTotal": docs}}, {"producer": "llm-cards", "payload": {"summary": summary}}]}
         if at == "root":
             return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {"docCount": 0},
-                                             "options": [node("node_re", "부동산본부", "부동산본부", 40, "임대차·렌트롤·건물 자료"), node("node_pop", "팝업", "팝업", 30, "팝업스토어 프로젝트 자료")], "totals": {}, "nextOffset": None})
+                                             "options": [node("node_re", "Real Estate", "Real Estate", 40, "임대차·렌트롤·건물 자료"), node("node_pop", "Campaigns", "Campaigns", 30, "campaign project material")], "totals": {}, "nextOffset": None})
         if at == "node_re":
-            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0},
-                                             "options": [node("node_lease", "임대차계약", "부동산본부/임대차계약", 12, "전대차·임대차 계약서와 약정서"), node("node_rr", "렌트롤", "부동산본부/렌트롤", 8, "임차인별 보증금 임대료 표")], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "Real Estate", "path": "Real Estate"}, "ancestors": [], "card": {"docCount": 0},
+                                             "options": [node("node_lease", "임대차계약", "Real Estate/임대차계약", 12, "전대차·임대차 계약서와 약정서"), node("node_rr", "렌트롤", "Real Estate/렌트롤", 8, "임차인별 보증금 임대료 표")], "totals": {}, "nextOffset": None})
         if at == "node_lease":
-            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_lease", "label": "임대차계약", "path": "부동산본부/임대차계약"}, "ancestors": [], "card": {"docCount": 12}, "options": [], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_lease", "label": "임대차계약", "path": "Real Estate/임대차계약"}, "ancestors": [], "card": {"docCount": 12}, "options": [], "totals": {}, "nextOffset": None})
         return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": at, "label": at, "path": at}, "ancestors": [], "card": {}, "options": [], "totals": {}, "nextOffset": None})
     if p.startswith("/api/proposals/") and p.endswith("/descriptors"):
         return httpx.Response(200, json={"ok": True, "descriptors": [
             {"kind": "card.doc", "producer": "cloudbtl-baseline", "payload": {"headline": "전 대 차 약 정 서", "snippet": "SECRET body"}},
-            {"kind": "card.doc", "producer": "llm-cards", "payload": {"summary": "이지스자산운용과 더내츄럴키친 사이 일산 GLC 전대차 약정서", "docType": "계약서", "period": "2020-03", "entities": ["이지스자산운용", "샐러드스탑"]}}]})
+            {"kind": "card.doc", "producer": "llm-cards", "payload": {"summary": "Example Asset and Brand A sublease agreement for Alpha Center", "docType": "계약서", "period": "2020-03", "entities": ["Example Asset", "Brand A"]}}]})
     if p.endswith("/move"):
         moves.append(json.loads(request.content)); return httpx.Response(200, json={"ok": True, "nodeId": "node_x", "path": json.loads(request.content)["to"], "attached": True, "by": "jev", "pinned": False})
     return httpx.Response(404)
@@ -317,18 +317,18 @@ def test_filing_makes_the_first_subfolder_in_an_empty_domain_and_siblings_follow
     def handler(request: httpx.Request):
         if request.url.path == "/api/options" and request.url.params.get("at") == "root":
             return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {"docCount": 0},
-                                             "options": [{"kind": "node", "id": "node_re", "label": "부동산본부", "weight": 0, "node": {"path": "부동산본부", "depth": 1, "docCount": 0, "docCountTotal": 0, "children": 0},
+                                             "options": [{"kind": "node", "id": "node_re", "label": "Real Estate", "weight": 0, "node": {"path": "Real Estate", "depth": 1, "docCount": 0, "docCountTotal": 0, "children": 0},
                                                           "cards": [{"producer": "cloudbtl-baseline", "payload": {"docCountTotal": 0, "metadata": {"kind": "domain"}}}, {"producer": "llm-cards", "payload": {"summary": "임대차·렌트롤·건물 자료"}}]}], "totals": {}, "nextOffset": None})
         if request.url.path == "/api/options" and request.url.params.get("at") == "node_re":
             # 빈 도메인 폴더 — 자식 없음, 카드 메타에 kind=domain
-            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain", "seeded": True}}, "options": [], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "Real Estate", "path": "Real Estate"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain", "seeded": True}}, "options": [], "totals": {}, "nextOffset": None})
         return _filing_tree_handler(moves, request)
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
-    doc = {"id": "prop_c", "title": "전대차약정서(일산GLC)", "documentType": "docx", "sourceRef": "[LM]/일산차병원/전대차약정서.docx"}
+    doc = {"id": "prop_c", "title": "전대차약정서(Alpha센터)", "documentType": "docx", "sourceRef": "RealEstate/Alpha센터/전대차약정서.docx"}
     pl = file_document(doc, cb, _lease_jev(), namer=Namer(None))
-    # 부동산본부(빈 도메인)에 들어가면 모델에게 '여기/새 폴더' 를 묻지 않고 첫 폴더를 만든다(이름은 Namer; 모델 없으면 유형)
-    assert pl.status == "placed_new_folder" and pl.path == "부동산본부/계약서" and pl.hops[-1]["source"] == "rule:empty-domain"
-    assert moves[-1]["to"] == "부동산본부/계약서"
+    # Real Estate(빈 도메인)에 들어가면 모델에게 '여기/새 폴더' 를 묻지 않고 첫 폴더를 만든다(이름은 Namer; 모델 없으면 유형)
+    assert pl.status == "placed_new_folder" and pl.path == "Real Estate/계약서" and pl.hops[-1]["source"] == "rule:empty-domain"
+    assert moves[-1]["to"] == "Real Estate/계약서"
     # 리더가 루트에서 미결이면 형제도 움직이지 않는다
     moves.clear()
     out = file_group([{"id": "prop_x", "title": "무관"}, {"id": "prop_y", "title": "무관 2"}], cb, Jev(api_key=""), namer=Namer(None))
@@ -345,12 +345,12 @@ def test_filing_in_a_domain_folder_never_drops_the_document_there_and_reuses_a_s
             at = request.url.params.get("at")
             if at == "root":
                 return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {},
-                                                 "options": [{"kind": "node", "id": "node_re", "label": "부동산본부", "weight": 1, "node": {"path": "부동산본부", "depth": 1, "docCount": 0, "docCountTotal": 1, "children": 1},
+                                                 "options": [{"kind": "node", "id": "node_re", "label": "Real Estate", "weight": 1, "node": {"path": "Real Estate", "depth": 1, "docCount": 0, "docCountTotal": 1, "children": 1},
                                                               "cards": [{"producer": "cloudbtl-baseline", "payload": {"metadata": {"kind": "domain", "description": "임대차·LOI·IM"}}}]}], "totals": {}, "nextOffset": None})
             if at == "node_re":
-                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain"}},
-                                                 "options": [{"kind": "node", "id": "node_g", "label": "더갤러리832", "weight": 1, "node": {"path": "부동산본부/더갤러리832", "depth": 2, "docCount": 1, "docCountTotal": 1, "children": 0}, "cards": []}], "totals": {}, "nextOffset": None})
-            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_g", "label": "더갤러리832", "path": "부동산본부/더갤러리832"}, "ancestors": [], "card": {"docCount": 1}, "options": [], "totals": {}, "nextOffset": None})
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "Real Estate", "path": "Real Estate"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain"}},
+                                                 "options": [{"kind": "node", "id": "node_g", "label": "Aurora센터", "weight": 1, "node": {"path": "Real Estate/Aurora센터", "depth": 2, "docCount": 1, "docCountTotal": 1, "children": 0}, "cards": []}], "totals": {}, "nextOffset": None})
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_g", "label": "Aurora센터", "path": "Real Estate/Aurora센터"}, "ancestors": [], "card": {"docCount": 1}, "options": [], "totals": {}, "nextOffset": None})
         return _filing_tree_handler(moves, request)
     def jev_handler(request: httpx.Request):
         body = json.loads(request.content); at = body["state"].get("at", ""); cands = body["state"]["candidates"]
@@ -358,17 +358,17 @@ def test_filing_in_a_domain_folder_never_drops_the_document_there_and_reuses_a_s
         return httpx.Response(200, json={"model": "jev-test", "answers": answers})
     class StubNamer(Namer):
         def name(self, question, siblings, parent, depth=1):
-            return "더갤러리 832"   # 형제 '더갤러리832' 와 같은 대상 — 표기만 다르다
+            return "Aurora 센터"   # 형제 'Aurora센터' 와 같은 대상 — 공백만 다르다
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
     pl = file_document({"id": "prop_loi", "title": "입점의향서_강남 갤러리 832호", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=StubNamer(None))
     # 도메인 폴더에서 모델이 미결 → '여기' 는 선택지에도 없고, Namer 이름이 형제와 같아 그 폴더로 내려가 거기에 둔다
     assert [c["kind"] for c in pl.hops[1]["candidates"]] == ["node", "new"]
     assert pl.hops[1]["chosen"] == "node_g" and pl.hops[1]["source"].endswith("+rule:namer-match")
-    assert pl.status == "undecided_here" and pl.path == "부동산본부/더갤러리832" and moves[-1]["to"] == "부동산본부/더갤러리832"
+    assert pl.status == "undecided_here" and pl.path == "Real Estate/Aurora센터" and moves[-1]["to"] == "Real Estate/Aurora센터"
     # 폴더명이 제목 안에 그대로 있으면 모델을 기다리지 않고 그 폴더로 (계약서 ⊂ 임대차계약서)
     moves.clear()
-    pl2 = file_document({"id": "prop_loi2", "title": "입점의향서_더갤러리832_모담다이닝", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=Namer(None))
-    assert pl2.hops[1]["chosen"] == "node_g" and pl2.hops[1]["source"].endswith("+rule:label-in-title") and pl2.path == "부동산본부/더갤러리832"
+    pl2 = file_document({"id": "prop_loi2", "title": "입점의향서_Aurora센터_모담다이닝", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=Namer(None))
+    assert pl2.hops[1]["chosen"] == "node_g" and pl2.hops[1]["source"].endswith("+rule:label-in-title") and pl2.path == "Real Estate/Aurora센터"
 
 
 def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():
@@ -376,14 +376,14 @@ def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():
     from jevrag.filing import file_document
     moves, logs = [], []
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(lambda r: _filing_tree_handler(moves, r)))
-    doc = {"id": "prop_c", "title": "전대차약정서(일산GLC)_샐러드스탑", "documentType": "docx", "sourceRef": "[LM]/일산차병원/전대차약정서.docx", "metadata": {"division": "LM", "_seenAt": []}}
+    doc = {"id": "prop_c", "title": "전대차약정서(Alpha센터)_Brand A", "documentType": "docx", "sourceRef": "RealEstate/Alpha센터/전대차약정서.docx", "metadata": {"division": "real-estate", "_seenAt": []}}
     pl = file_document(doc, cb, _lease_jev(), log=logs.append)
-    # Jev(목): 임대 관련 폴더를 높이 치고, '임대차계약' 폴더에 서면 '여기에 둔다' → 부동산본부 → 임대차계약 → 여기에 둔다
+    # Jev(목): 임대 관련 폴더를 높이 치고, '임대차계약' 폴더에 서면 '여기에 둔다' → Real Estate → 임대차계약 → 여기에 둔다
     assert [h["chosen"] for h in pl.hops][:2] == ["node_re", "node_lease"]
-    assert pl.status == "placed" and pl.path == "부동산본부/임대차계약"
-    assert moves == [{"proposalId": "prop_c", "from": None, "to": "부동산본부/임대차계약", "by": "jev", "reason": "file:placed"}]
+    assert pl.status == "placed" and pl.path == "Real Estate/임대차계약"
+    assert moves == [{"proposalId": "prop_c", "from": None, "to": "Real Estate/임대차계약", "by": "jev", "reason": "file:placed"}]
     rec = logs[0]
-    assert rec["event"] == "file" and rec["path"] == "부동산본부/임대차계약" and len(rec["hops"]) == 3
+    assert rec["event"] == "file" and rec["path"] == "Real Estate/임대차계약" and len(rec["hops"]) == 3
     assert "SECRET" not in json.dumps(rec) and "_seenAt" not in rec["question"]
     # 홉 로그에는 본 카드와 점수가 남는다(채점표)
     assert rec["hops"][0]["candidates"][0]["kind"] == "node" and rec["hops"][0]["ranked"]

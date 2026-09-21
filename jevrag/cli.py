@@ -53,7 +53,8 @@ def main(argv=None) -> int:
     f.add_argument("--tree", default="filed"); f.add_argument("--source"); f.add_argument("--batch"); f.add_argument("--node", help="only documents under this source-tree node id")
     f.add_argument("--limit", type=int, default=50); f.add_argument("--group-by-folder", action="store_true", help="file one per source folder, attach siblings")
     f.add_argument("--dry-run", action="store_true"); f.add_argument("--log", default=None); f.add_argument("--fan-out", type=int, default=20)
-    sm = sub.add_parser("seed-trees", help="create the memory (도메인→주제) and filed trees with their skeletons")
+    sm = sub.add_parser("seed-trees", help="create memory and filed trees from a generic or supplied skeleton")
+    sm.add_argument("--skeleton", default=os.getenv("JEVRAG_SKELETON"), help="JSON file containing deployment-specific domains and topics")
     wt = sub.add_parser("watch", help="keep filing as documents arrive (inbox folder with --local; notInTree queue on CloudBTL)")
     wt.add_argument("--tree", default="filed"); wt.add_argument("--interval", type=float, default=5.0, help="seconds between polls")
     wt.add_argument("--settle", type=float, default=3.0, help="seconds a file must stay unchanged before it is filed (local)")
@@ -125,10 +126,11 @@ def main(argv=None) -> int:
         st = enr.run(limit=ns.limit, refresh=ns.refresh, max_minutes=ns.max_minutes, nodes=not ns.no_nodes)
         print(json.dumps({"documents": st.documents, "nodes": st.nodes, "failed": st.failed, "ms": st.ms}, ensure_ascii=False)); return 0
     if ns.cmd == "seed-trees":
-        from .skeleton import memory_nodes, filed_nodes
+        from .skeleton import filed_nodes, load_skeleton, memory_nodes
+        skeleton = load_skeleton(ns.skeleton)
         cb = CloudBTL()
-        m = cb.ensure_tree("memory", "Memory", "jevrag", "0.2"); r = cb.upsert_nodes("memory", memory_nodes(), [], placed_by="seed")
-        f_ = cb.ensure_tree("filed", "Filed", "jevrag", "0.2"); rf = cb.upsert_nodes("filed", filed_nodes(), [], placed_by="seed")
+        m = cb.ensure_tree("memory", "Memory", "jevrag", "0.2"); r = cb.upsert_nodes("memory", memory_nodes(skeleton), [], placed_by="seed")
+        f_ = cb.ensure_tree("filed", "Filed", "jevrag", "0.2"); rf = cb.upsert_nodes("filed", filed_nodes(skeleton), [], placed_by="seed")
         print(json.dumps({"memory": m.get("id"), "memory_nodes": r.get("nodes"), "filed": f_.get("id"), "filed_nodes": rf.get("nodes")}, ensure_ascii=False)); return 0
     if ns.cmd == "file":
         from .filing import file_document, file_group, Namer

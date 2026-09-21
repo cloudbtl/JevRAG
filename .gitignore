@@ -7,3 +7,6 @@ build/
 .venv/
 decisions.jsonl
 .env
+.env.*
+!.env.example
+.omc/
