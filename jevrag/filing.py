@@ -121,11 +121,10 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
     path = ""
     node_id: str | None = None
     for _ in range(max_hops):
-        res = cb.options(tree=tree, at=at, limit=fan_out)
+        res, folders = _folder_options(cb, tree, at, fan_out, str(doc.get("title") or ""))
         node = res.get("at") or {}
         path = node.get("path") or ""
         node_id = node.get("id")
-        folders = [c for c in hop_cards(res.get("options") or []) if c.kind == "node"]
         node_meta = ((res.get("card") or {}).get("metadata") or {}) if isinstance((res.get("card") or {}).get("metadata"), dict) else {}
         if not folders and (not path or node_meta.get("kind") == "domain"):
             # 빈 루트·빈 도메인 폴더: 사람도 여기엔 문서를 바로 두지 않고 첫 폴더를 만든다. 모델에게 '여기/새 폴더' 둘만 묻지 않는다.
@@ -139,6 +138,8 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
             choices.append(HopCard(HERE, "here", "■ 여기에 둔다", "현재 폴더가 이 문서의 자리 — 형제 문서들과 같은 종류·주제", {"path": path or "(root)", "docs": (res.get("card") or {}).get("docCount")}))
         choices.append(HopCard(NEW, "new", "＋ 새 폴더", "자식 중에 맞는 곳이 없어 이 폴더 안에 새 폴더를 만든다", {"siblings": len(folders)}))
         hop = _decide_hop(question, node, choices, jev)
+        if hop.source == "heuristic":
+            hop.chosen = None          # the model was unavailable: word overlap may search, it must not move files
         # 배치 질문은 검색 질문과 다르다 — 홉 로그에는 카드·점수·선택을 그대로 남긴다
         hops.append({"at": path or "(root)", "candidates": [c.for_model() | {"id": c.id} for c in choices], "ranked": hop.ranked[:5],
                      "chosen": hop.chosen.id if hop.chosen else None, "source": hop.source, "jev_ms": hop.jev.elapsed_ms if hop.jev else None})
@@ -178,8 +179,38 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
     return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
 
 
+def _folder_options(cb: CloudBTL, tree: str, at: str, fan_out: int, title: str = "") -> tuple[dict[str, Any], list[HopCard]]:
+    """The fileable child folders at `at`, at most fan_out of them, chosen for the document rather than by size.
+
+    Options arrive sorted by subtree size, so a folder made yesterday for exactly this kind of file sits on the last page.
+    Page through every folder (stop when documents start), drop noFiling ones (a code repository, say — a person would not
+    drop a receipt into a git checkout), then rank: folder name inside the title first, then folders that carry a
+    description or summary, then size."""
+    first: dict[str, Any] | None = None
+    folders: list[HopCard] = []
+    offset = 0
+    while True:
+        res = cb.options(tree=tree, at=at, limit=200, offset=offset)
+        first = first or res
+        opts = res.get("options") or []
+        nodes = [o for o in opts if o.get("kind") == "node"]
+        folders += [c for c in hop_cards(nodes) if not c.hidden.get("noFiling")]
+        nxt = res.get("nextOffset")
+        if nxt is None or len(nodes) < len(opts):   # documents started → no more folders
+            break
+        offset = nxt
+    if len(folders) > fan_out:
+        t = _norm(title)
+        folders.sort(key=lambda c: (0 if (len(_norm(c.label)) >= 2 and _norm(c.label) in t) else 1,
+                                    0 if c.hidden.get("described") else 1,
+                                    -float(c.facts.get("docs") or 0)))
+        folders = folders[:fan_out]
+    return first or {}, folders
+
+
 def _norm(x: str) -> str:
-    return "".join(ch for ch in str(x).lower() if ch.isalnum())
+    import unicodedata
+    return "".join(ch for ch in unicodedata.normalize("NFC", str(x)).lower() if ch.isalnum())   # macOS file names arrive NFD
 
 
 def _same_label(a: str, b: str) -> bool:

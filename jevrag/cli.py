@@ -12,7 +12,22 @@ from .options import build_card
 from .pipeline import Pipeline
 
 
+def _load_env_file() -> None:
+    """~/.config/jevrag/env (KEY=VALUE lines) fills in variables the process did not get — launchd and cron start without a shell."""
+    p = os.path.expanduser(os.getenv("JEVRAG_ENV_FILE", "~/.config/jevrag/env"))
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+    except OSError:
+        pass
+
+
 def main(argv=None) -> int:
+    _load_env_file()
     ap = argparse.ArgumentParser(prog="jevrag")
     ap.add_argument("--local", metavar="DIR", default=os.getenv("JEVRAG_LOCAL_ROOT"),
                     help="run over a directory on this machine instead of CloudBTL (folders = nodes, files = documents; filing moves files)")

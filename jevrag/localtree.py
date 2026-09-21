@@ -31,6 +31,12 @@ TYPE_BY_EXT = {".pdf": "pdf", ".html": "html", ".htm": "html", ".md": "md", ".ma
                ".mp4": "video", ".mov": "video", ".zip": "archive", ".dwg": "cad"}
 
 
+def nfc(x: str) -> str:
+    """macOS stores Korean file names decomposed (NFD); everything the model or a rule compares must be NFC."""
+    import unicodedata
+    return unicodedata.normalize("NFC", x)
+
+
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -111,10 +117,12 @@ class LocalTree:
         for prefix in ("node:", "doc:"):
             if ref.startswith(prefix):
                 ref = ref[len(prefix):]
+        if ref.startswith("/"):                 # a file outside the root (an inbox above it) — ids are absolute paths
+            return Path(ref).resolve()
         return (self.root / ref).resolve()
 
     def _skip(self, name: str) -> bool:
-        return (name.startswith(".") and not self.hidden) or name == ".jevrag" or name in ("Thumbs.db", "desktop.ini")
+        return (name.startswith(".") and not self.hidden) or name in (".jevrag", "Thumbs.db", "desktop.ini", ".localized", "node_modules", "__pycache__", ".venv", "venv")
 
     def _skip_dir(self, p: Path) -> bool:
         """The inbox is the queue, never a destination or a hop."""
@@ -160,20 +168,31 @@ class LocalTree:
 
     # ── cards ──
     def _domain(self, rel: str) -> dict[str, Any]:
+        """Node metadata from .jevrag/config.json: domains (kind=domain + description), no_filing (globs), plus repo detection."""
+        import fnmatch
+        meta: dict[str, Any] = {}
         domains = self._config.get("domains") or {}
+        rel = nfc(rel)
         if rel in domains:
-            return {"kind": "domain", "description": str(domains[rel]), "seeded": True}
-        return {}
+            meta.update({"kind": "domain", "description": str(domains[rel]), "seeded": True})
+        desc = (self._config.get("descriptions") or {}).get(rel)
+        if desc and "description" not in meta:
+            meta["description"] = str(desc)
+        if rel and any((self.root / r / ".git").exists() for r in {rel, __import__("unicodedata").normalize("NFD", rel)}):
+            meta["repo"] = True; meta["noFiling"] = True          # code checkouts are places to search, not to file into
+        if any(fnmatch.fnmatch(rel, pat) for pat in (self._config.get("no_filing") or [])):
+            meta["noFiling"] = True
+        return meta
 
     def node_card(self, rel: str) -> dict[str, Any]:
         stats = self._ensure_stats()
         st = stats.get(rel, _DirStats())
         kids = sorted(st.children, key=lambda c: (-stats.get(c, _DirStats()).docs_total, c))
         return {
-            "label": rel.rsplit("/", 1)[-1] if rel else self.root.name, "path": rel, "depth": rel.count("/") + 1 if rel else 0,
+            "label": nfc(rel.rsplit("/", 1)[-1] if rel else self.root.name), "path": rel, "depth": rel.count("/") + 1 if rel else 0,
             "children": len(st.children), "docCount": st.docs, "docCountTotal": st.docs_total, "byType": dict(sorted(st.by_type.items())),
             "landedRange": {"from": _iso(st.min_m), "to": _iso(st.max_m)} if st.min_m is not None and st.max_m is not None else None,
-            "sampleTitles": st.titles[:5], "childLabels": [c.rsplit("/", 1)[-1] for c in kids[:8]], "metadata": self._domain(rel),
+            "sampleTitles": [nfc(t) for t in st.titles[:5]], "childLabels": [nfc(c.rsplit("/", 1)[-1]) for c in kids[:8]], "metadata": self._domain(rel),
             "asOf": st.docs_total,
         }
 
@@ -190,8 +209,8 @@ class LocalTree:
                             break
             except OSError:
                 pass
-        card = {"title": p.stem, "filename": p.name, "documentType": doc_type(p.name), "fileSize": s.st_size, "modifiedAt": _iso(s.st_mtime),
-                "headline": headline, "metadata": {"ext": p.suffix.lower().lstrip(".")}}
+        card = {"title": nfc(p.stem), "filename": nfc(p.name), "documentType": doc_type(p.name), "fileSize": s.st_size, "modifiedAt": _iso(s.st_mtime),
+                "headline": nfc(headline), "metadata": {"ext": p.suffix.lower().lstrip(".")}}
         if headline:
             card["hasText"] = True   # unknown otherwise — saying False would read as "lacks the information" to the model
         card.update(cheap_facts(p, s.st_size))
@@ -246,7 +265,7 @@ class LocalTree:
         out: list[dict[str, Any]] = []
         while True:
             rel = self.rel(p)
-            out.insert(0, {"id": "node:" + rel if rel else "root", "label": rel.rsplit("/", 1)[-1] if rel else self.root.name, "path": rel, "depth": rel.count("/") + 1 if rel else 0})
+            out.insert(0, {"id": "node:" + rel if rel else "root", "label": nfc(rel.rsplit("/", 1)[-1] if rel else self.root.name), "path": rel, "depth": rel.count("/") + 1 if rel else 0})
             if not rel:
                 return out
             p = p.parent
@@ -260,7 +279,7 @@ class LocalTree:
         rows: list[dict[str, Any]] = []
         if p.is_file():
             rows.append({"kind": "card.doc", "page": 0, "producer": PRODUCER, "producerVersion": VERSION, "payload": self.doc_card(p)})
-            rows += self._extra_cards("doc:" + self.rel(p))
+            rows += self._extra_cards("doc:" + self._rel_or_abs(p))
         return [r for r in rows if (not kind or r.get("kind") == kind) and (not producer or r.get("producer") == producer)]
 
     def node_descriptors(self, node_id: str, kind: str | None = None, producer: str | None = None) -> list[dict[str, Any]]:
@@ -281,18 +300,22 @@ class LocalTree:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
         return {"ok": True, "written": len(items), "kinds": sorted(kinds)}
 
-    def list_documents(self, *, node: str | None = None, not_in_tree: str | None = None, limit: int = 200, **_: Any) -> list[dict[str, Any]]:
-        """The filing queue: files in the inbox (or under a node), newest first."""
+    def list_documents(self, *, node: str | None = None, not_in_tree: str | None = None, limit: int = 200, recursive: bool | None = None, **_: Any) -> list[dict[str, Any]]:
+        """The filing queue: files lying in the inbox (top level only unless recursive — an inbox like ~/Desktop holds other folders that are not queue), newest first."""
         base = self._path_of(node) if node else self.inbox
         if not base.is_dir():
             return []
-        files = [f for f in base.rglob("*") if f.is_file() and not self._skip(f.name) and ".jevrag" not in f.parts]
+        recursive = bool(self._config.get("inbox_recursive")) if recursive is None else recursive
+        it = base.rglob("*") if recursive else base.iterdir()
+        inbox_inside_root = base == self.root or self.root in base.parents
+        files = [f for f in it if f.is_file() and not self._skip(f.name) and ".jevrag" not in f.parts
+                 and (inbox_inside_root or self.root not in f.resolve().parents)]   # an inbox above the root (~/Desktop ⊃ Desktopped) must not sweep the root itself
         files.sort(key=lambda f: (-f.stat().st_mtime, f.name))
         out = []
         for f in files[:limit]:
             card = self.doc_card(f)
             rel = self._rel_or_abs(f)
-            out.append({"id": rel if rel.startswith("/") else "doc:" + rel, "title": card["title"], "originalFilename": f.name, "documentType": card["documentType"],
+            out.append({"id": rel if rel.startswith("/") else "doc:" + rel, "title": card["title"], "originalFilename": nfc(f.name), "documentType": card["documentType"],
                         "fileSize": card["fileSize"], "createdAt": card["modifiedAt"], "sourceRef": rel, "metadata": card["metadata"]})
         return out
 

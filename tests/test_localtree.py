@@ -114,6 +114,26 @@ def test_filing_moves_files_on_disk_writes_the_ledger_and_respects_a_human_pin(d
     assert opt["document"]["placedBy"] == "human" and opt["document"]["pinned"] is True
 
 
+def test_repos_are_searchable_but_never_filing_destinations_and_an_inbox_above_the_root_does_not_sweep_it(tmp_path: Path):
+    root = tmp_path / "Desktopped"; (root / "finance-ax" / ".git").mkdir(parents=True); (root / "자료").mkdir()
+    (root / "finance-ax" / "README.md").write_text("# finance", encoding="utf-8")
+    (root / ".jevrag").mkdir(); (root / ".jevrag" / "config.json").write_text(json.dumps({"no_filing": ["테스트*"], "descriptions": {"자료": "문서·표·자료"}}), encoding="utf-8")
+    (root / "테스트").mkdir()
+    (tmp_path / "AX_회수시간.xlsx").write_bytes(b"x")                 # lying on the desk (= inbox), next to Desktopped
+    (tmp_path / "CompanyBrain").mkdir(); (tmp_path / "CompanyBrain" / "HANDOFF.md").write_text("x", encoding="utf-8")
+    desk = LocalTree(root, inbox=tmp_path)
+    # queue = top-level files of the inbox only: not the root's own files, not other folders on the desk
+    assert [d["title"] for d in desk.list_documents()] == ["AX_회수시간"]
+    cards = hop_cards(desk.options(at="root")["options"])
+    by = {c.label: c for c in cards}
+    assert by["finance-ax"].hidden == {"repo": True, "noFiling": True} and by["테스트"].hidden == {"noFiling": True}
+    assert by["자료"].hidden == {"described": True} and by["자료"].summary == "문서·표·자료"
+    assert "noFiling" not in json.dumps(by["finance-ax"].for_model())      # the model is not told about routing hints
+    # filing at the root sees only 자료 as a folder
+    folders = [c for c in cards if c.kind == "node" and not c.hidden.get("noFiling")]
+    assert [c.label for c in folders] == ["자료"]
+
+
 def test_put_descriptors_replace_per_producer_and_show_up_in_hops(desk: LocalTree):
     desk.put_descriptors({"nodeId": "node:업무/렌트롤"}, "llm-cards", "q1", [{"kind": "card.node", "page": 0, "payload": {"summary": "임차인별 보증금·임대료 표"}}])
     desk.put_descriptors({"nodeId": "node:업무/렌트롤"}, "llm-cards", "q2", [{"kind": "card.node", "page": 0, "payload": {"summary": "렌트롤(임차인별 보증금·임대료)"}}])

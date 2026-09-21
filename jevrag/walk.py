@@ -24,6 +24,7 @@ from .options import mask
 USEFUL_MIN = 2           # documents, pages, stop: "useful for locating / partial evidence" or better
 NODE_MIN = 1.5           # folders only locate — a folder card rarely "directly states" anything, so entering one takes less
 LEAF_DOC_MIN = 1.25      # in a folder with no subfolders, a topic-matching document (rubric 1 = "unknown whether it holds it") beats wandering
+MARGIN_MIN, MARGIN = 1.0, 0.4   # a folder under NODE_MIN is still entered when it clearly leads the second option — thin cards compress the scale, the ranking holds
 GROUP_THRESHOLD = 8      # more documents than this at a node → show type groups first
 _WORD = re.compile(r"[\w가-힣]+")
 
@@ -38,12 +39,13 @@ class OptionsSource(Protocol):
 
 @dataclass
 class HopCard:
-    """Masked view of one option at a hop — exactly what the model sees."""
+    """Masked view of one option at a hop — exactly what the model sees (plus `hidden`, which it does not)."""
     id: str
     kind: str            # node | document | page | group | up | stop
     label: str
     summary: str         # enricher summary if any, else baseline headline/snippet
     facts: dict[str, Any] = field(default_factory=dict)
+    hidden: dict[str, Any] = field(default_factory=dict)   # routing hints for code (noFiling, repo…), never sent to the model
     members: list[str] = field(default_factory=list)   # group: document ids
 
     def for_model(self) -> dict[str, Any]:
@@ -103,7 +105,8 @@ def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
             if enr.get("period"):
                 facts["period"] = enr["period"]
             meta = base.get("metadata") if isinstance(base.get("metadata"), dict) else {}
-            if not summary and meta.get("description"):
+            described = bool(meta.get("description"))
+            if not summary and described:
                 summary = str(meta["description"])          # 뼈대 노드의 사람이 쓴 설명
             if not summary and base.get("sampleTitles"):
                 summary = "e.g. " + "; ".join(str(t) for t in base["sampleTitles"][:3])
@@ -123,7 +126,10 @@ def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
                 facts["label"] = base["label"]
             if not summary:
                 summary = str(base.get("headline") or base.get("snippet") or "")
-        out.append(HopCard(id=o["id"], kind=o["kind"], label=o.get("label") or o["id"], summary=summary, facts=facts))
+        hidden = {k: v for k, v in ((base.get("metadata") or {}).items() if isinstance(base.get("metadata"), dict) else ()) if k in ("noFiling", "repo", "kind")}
+        if o["kind"] == "node" and (enr.get("summary") or (isinstance(base.get("metadata"), dict) and base["metadata"].get("description"))):
+            hidden["described"] = True                       # a written or model summary, not just sample titles
+        out.append(HopCard(id=o["id"], kind=o["kind"], label=o.get("label") or o["id"], summary=summary, facts=facts, hidden=hidden))
     return out
 
 
@@ -252,17 +258,21 @@ def _decide_hop(question: str, at: dict[str, Any], cards: list[HopCard], jev: Je
     best_id, best_score, _ = ranked[0]
     best = next((c for c in cards if c.id == best_id), None)
     chosen = best if best is not None and best_score >= (NODE_MIN if best.kind == "node" else USEFUL_MIN) else None
+    if chosen is None and best is not None and best.kind == "node" and best_score >= MARGIN_MIN:
+        second = ranked[1][1] if len(ranked) > 1 else 0.0
+        if best_score - second >= MARGIN:
+            chosen = best; source += "+rule:margin"
     return Hop(at=at, cards=cards, ranked=ranked, chosen=chosen, source=source, jev=res)
 
 
 def _heuristic_rank(question: str, cards: list[HopCard]) -> list[tuple[str, float, float]]:
-    qwords = set(_WORD.findall(question.lower()))
+    qwords = {w for w in _WORD.findall(question.lower()) if not w.isdigit() and len(w) > 1}   # dates and counters are not topics
     ranked = []
     for c in cards:
         if c.kind in ("up", "stop"):
             ranked.append((c.id, 0.0, 0.3)); continue
         text = " ".join([c.label, c.summary, " ".join(str(v) for v in c.facts.values())]).lower()
-        overlap = len(qwords & set(_WORD.findall(text)))
+        overlap = len(qwords & {w for w in _WORD.findall(text) if not w.isdigit() and len(w) > 1})
         score = 3.0 if overlap >= 3 else 2.0 if overlap == 2 else 1.0 if overlap == 1 else 0.0
         ranked.append((c.id, score, 0.3))
     ranked.sort(key=lambda x: -x[1])
