@@ -1,281 +1,268 @@
 # JevRAG
 
-**Option-ready retrieval for decision models.** A reference implementation that pairs
-[TypeSafe AI's Jev](https://docs.typesafe.ai/) (a *System One* / decision foundation model that
-answers typed questions — `choice`, `score`, `noul` — over a state you provide) with the
-[CloudBTL landing layer](https://cloudbtl.com)
-(documents stored with structured, versioned, provenance-carrying *descriptors*).
+**Retrieval as a sequence of small, inspectable decisions.**
 
-The premise: a decision model is fast, cheap and auditable **only when it is given well-described
-options**. Vector search hands it nearest neighbors; CloudBTL hands it option cards — what each
-document contains, under which conditions, from which page. JevRAG is the loop in between.
+[![CI](https://github.com/cloudbtl/JevRAG/actions/workflows/ci.yml/badge.svg)](https://github.com/cloudbtl/JevRAG/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
+JevRAG navigates large document collections without placing the whole collection in a model context or reducing every query to nearest-neighbor search. At each hop, it gives a decision model a small set of well-described options: folders, documents, pages, actions, or a stop condition.
+
+If each hop offers 20 branches, a six-hop tree has an address space of 64 million leaves while showing the model only one small option set at a time. That is a branching calculation, not a quality or latency claim. The tree only works when each option says what lies beneath it, so JevRAG treats descriptors and provenance as part of retrieval itself.
+
+```mermaid
+flowchart LR
+    Q[Question] --> C[Build option cards]
+    C --> D{Choose next step}
+    D -->|folder| C
+    D -->|document or page| S[Return selected sources]
+    S --> E[Optional typed executor]
+    D -->|insufficient| A[Abstain or clarify]
+    E --> R[Structured result with evidence]
+    R --> L[Decision log]
 ```
-question ─▶ build option cards (CloudBTL descriptors) ─▶ Jev chooses source & action
-        ─▶ code executes (lookup · filter · count · compare on structured fields)
-        ─▶ answer with page-level provenance ─▶ decision log (for review & improvement)
+
+JevRAG is designed for [TypeSafe AI's Jev](https://docs.typesafe.ai/), a typed decision model. A deterministic heuristic keeps the project runnable without a Jev API key.
+
+## Quick start: search a local folder
+
+```bash
+git clone https://github.com/cloudbtl/JevRAG.git
+cd JevRAG
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Walk to one likely document using names and file-system metadata:
+
+```bash
+jevrag --local ~/Documents walk "Which folder contains the March 2026 rent roll?"
+```
+
+The result is JSON with a status, chosen path, target card, and per-hop ranking:
+
+```json
+{
+  "status": "document",
+  "path": ["Finance", "Rent Rolls", "March_2026_Rent_Roll"],
+  "target": {
+    "kind": "document",
+    "label": "March_2026_Rent_Roll",
+    "id": "doc:Finance/Rent Rolls/March_2026_Rent_Roll.xlsx"
+  }
+}
+```
+
+Gather every relevant document across multiple branches:
+
+```bash
+jevrag --local ~/Documents gather "All files named for Project Aurora"
+```
+
+Local mode reads names, extensions, sizes, modified times, subtree counts, Office titles, sheet names, slide counts, PDF page counts, and the first line of small text files. It does not send document bodies to the decision model.
+
+Add Jev when you want model-based choices:
+
+```bash
+export TYPESAFE_API_KEY=...
+jevrag --local ~/Documents gather "All evidence for the 2026 renewal decision"
 ```
 
 ## Design principles
 
-- **Describe before deciding.** Retrieval quality starts with compact option cards that state contents, conditions, coverage and provenance.
-- **The model chooses; code executes.** Jev selects sources and actions, while deterministic code performs lookup, filter, count and compare.
-- **Abstention is a result.** Low scores and missing conditions produce `insufficient_options` or clarification instead of a forced best guess.
-- **Trees are views, not truth.** Folder, facet and memory trees can coexist over the same immutable documents.
-- **Domain meaning is injected.** Departments, terms, memory layers and filing rules come from deployment configuration, never from the engine.
-- **Every decision is reviewable.** Logs preserve offered options, scores, actions and evidence; human moves override and pin automated filing.
+1. **Describe before deciding.** Retrieval quality starts with option cards that state contents, conditions, coverage, and provenance.
+2. **The model chooses; code executes.** Jev selects sources and actions. Deterministic executors perform lookup, filtering, counting, and comparison.
+3. **Abstention is a result.** Weak options produce `insufficient_options` or a clarification request instead of a forced winner.
+4. **Trees are views, not truth.** Folder, facet, memory, and generated trees can coexist over the same documents.
+5. **Domain meaning is injected.** Departments, terminology, memory layers, and filing rules come from deployment configuration.
+6. **Every decision is reviewable.** Logs retain the options shown, scores returned, paths taken, actions executed, and evidence used.
+7. **Human moves win.** A person can move and pin a document; automated filing must preserve that override.
 
-## Why not just RAG
+## Four operations, one option contract
 
-| | Similarity retrieval | JevRAG |
-|---|---|---|
-| What the model sees | top-k chunks by vector distance | option cards: title, what it contains, conditions, coverage, provenance |
-| What it can do | read and paraphrase | choose a source, choose an action, ask for clarification |
-| Filter / count / compare | no (needs a second system) | yes — executors run on structured descriptors (`fields.*`) |
-| Why this answer? | opaque | every step is a typed answer with probabilities + the page it came from |
-| Cost per decision | LLM generation | one System One call (~1 s for 40 candidates in our measurements) |
+| Command | Question it answers | Result |
+| --- | --- | --- |
+| `walk` | “Which single branch or document should I open?” | One path and target |
+| `gather` | “Which documents across the tree may all matter?” | Relevant, maybe, and pruned sets |
+| `file` | “Where should this incoming document live?” | Placement or undecided |
+| `watch` | “Can filing continue as documents arrive?” | Repeated, logged placement passes |
 
-Embeddings are not the enemy: CloudBTL stores them as one descriptor among many. The difference is
-that a *described* document can also be filtered, counted and compared, and the model's choice can
-be checked against the page it came from.
+All four consume the same compact cards. The option source may be a local directory or a CloudBTL tree.
 
-## Install
+`walk` and `gather` select sources; they do not write a prose answer. `ask` can execute typed operations over structured descriptors and returns a structured result with evidence. Answer wording belongs to the calling application.
 
-```bash
-pip install -e .
-export TYPESAFE_API_KEY=...            # optional — without it the heuristic chooser runs
-export CLOUDBTL_API_BASE=https://acme.cloudbtl.com
-export CLOUDBTL_TOKEN=cbtl_...         # a CloudBTL API token (read scope is enough)
-```
+## What the model sees
 
-## Use
-
-```bash
-jevrag options prop_abc123                       # see the option card CloudBTL yields for a document
-jevrag ask "average unit price for staffing agencies in our quotes"
-jevrag ask "which contracts expire within 6 months" --scope batch_2026_09
-jevrag replay decisions.jsonl                     # re-run logged questions against current descriptors
-jevrag walk "which rent roll contains Tower A tenants"  # hop through a CloudBTL tree (see below)
-```
-
-```python
-from jevrag import Pipeline
-p = Pipeline.from_env()
-ans = p.ask("Which venues did we run F&B popups in, and what did each cost?")
-print(ans.text)            # answer text assembled from executed facts
-print(ans.evidence)        # [(document id, page, kind, producer), ...]
-print(ans.decisions)       # every Jev question asked, its typed answer and confidence
-```
-
-## Walking a tree (CloudBTL spec 1.2)
-
-CloudBTL keeps *trees* — option hierarchies whose nodes (folders, batches, facet values, clusters)
-and documents carry **cards** (`card.node`, `card.doc`, `card.page`). One hop is
-`GET /api/options?tree=folders&at=<node|document>&limit=20`: the child nodes, then the documents
-at that node (or the pages of a document), each with its cards from every producer — the
-deterministic baseline header plus whatever an enricher wrote (a one-line LLM summary, say).
-
-`jevrag walk` asks Jev at every hop to score each option 0–3 on "should we go here to answer the
-question", descends into the best one, and stops on a document (or page with `--pages`), when
-nothing scores ≥ 2, or after `--max-hops`. Twenty options × six hops covers 20^6 places while the
-model only ever sees twenty cards.
-
-```bash
-jevrag walk "Tower A tenant deposits and rent" --tree folders --fan-out 20 --max-hops 6
-# → path ["Real Estate", "Leasing", "Tower A", "Rent Roll 2026-03"]
-```
-
-```python
-from jevrag import CloudBTL, walk
-w = walk("Tower A tenant deposits and rent", CloudBTL())
-w.path, w.status, w.target.id      # labels chosen per hop · document|page|leaf|insufficient_options|max_hops · prop_…
-```
-
-The walker never sees bodies: node cards carry counts, type mix, landed range and sample titles;
-document cards carry title, type, page count, sheet names, metadata and a 120-char headline;
-enricher summaries (`card.*` under another producer) take precedence in the `summary` field.
-
-### Every relevant document — `jevrag gather`
-
-`walk` answers "which one"; `gather` answers "which ones". At every node it scores the same option cards, enters every
-folder that clears the bar (at most `--beam` per node, margin rule as in walk), keeps every document at or above 1.5,
-and returns documents scored 1.0–1.5 separately as *maybe* — offered, not asserted. It stops when the frontier is empty
-or `--max-calls` model calls (about a second each) are spent; the result says which and how many folders were pruned.
-
-```bash
-jevrag --local ~/Documents/Workspace gather "documents related to quote automation" --max-calls 30
-# complete · 13 calls · 2 documents, 11 maybe · folders entered 5, pruned 78
-#   1.69  estimate/all_estimate_items_analysis
-#   1.52  /quotations
-#   maybe: 1.48 estimate/db_quote_line_items · 1.26 proposal-sample/quotes/notes · …
-```
-
-### Let Jev choose the card fields
-
-Cards can become noisy when every descriptor is unfolded at every hop. `--fields auto` first gives Jev the available field families and their coverage, then uses its selected profile for the walk or gather. Labels, document type, summary and document counts remain a fixed base so the field-selection step cannot hide the only useful branch.
-
-```bash
-jevrag --local ~/Documents/Workspace gather "documents related to quote automation" --fields auto
-jevrag walk "2026년 3월 렌트롤" --tree folders --fields docType,period,entities
-```
-
-The selected profile is written to the decision log. Treat this as part of retrieval, not as proof of quality: compare it against a fixed answer bundle in `eval/` before making `auto` the default.
-
-## Nightly card enricher (local LLM)
-
-Baseline cards are deterministic headers. `jevrag enrich-cards` adds the one-line *content* summary a
-hop needs, with a local Ollama model, under producer `llm-cards` (so consumers can weigh it
-differently from `cloudbtl-baseline`):
-
-```bash
-export CLOUDBTL_API_BASE=… CLOUDBTL_TOKEN=cbtl_…   # full-scope token: it writes descriptors
-jevrag enrich-cards --model qwen3.6:35b-a3b --limit 600 --max-minutes 360 --log enrich.jsonl
-```
-
-Documents first (`GET /api/documents?missingProducer=llm-cards&kind=text.page` → first ~7k chars of
-`text.page` in page order → `{summary, docType, topics, entities, period, language}` →
-`PUT /api/proposals/:id/descriptors`), then nodes deepest-first (label, path, type mix, sample titles
-and the summaries of documents inside → `{summary, topics, entities, period}` →
-`PUT /api/nodes/:id/descriptors`). Structured output (`format` = JSON schema, `think: false`); one
-failure never stops the run. A 35B-A3B MoE on an M4 Pro does a document in ~10 s, so a few hundred
-new documents fit in one night. Precise field extraction (`fields.*`) is a different job for a
-stronger model and stays out of this enricher.
-
-## Filing — walking in reverse
-
-`jevrag file` puts documents *into* a Jev-managed tree the way a person files them: the document's own
-card is the question, the options at each hop are the child folders plus **여기에 둔다** (here) and
-**새 폴더** (new folder, named by the local model). Every placement goes to
-`POST /api/trees/:tree/move` with `by=jev` and to a JSONL decision log (cards seen, scores, path), so
-people can review, move and pin — human moves pin the document and Jev never moves it again.
-
-```bash
-jevrag seed-trees                                  # generic memory and filed skeletons
-jevrag seed-trees --skeleton ./company-skeleton.json  # deployment-specific domains and topics
-jevrag file --tree filed --group-by-folder --limit 300 --log file.jsonl   # queue = GET /documents?notInTree=filed
-jevrag file --tree filed --node <folders node id> --dry-run              # one source folder, no writes
-```
-
-The skeleton JSON owns domain names, descriptions, topics and the optional company-wide inheritance root; see [`examples/company-skeleton.json`](examples/company-skeleton.json). Memory layers are metadata, not folders, so the same item can retain its epistemic role without being trapped under one department.
-
-Rules learned from the first live runs (the log names them in `hops[].source`):
-
-- Folders enter at score ≥ 1.5 (`NODE_MIN`); a folder card only *locates*, so the rubric's top level is out of reach for it. Documents, *here* and *stop* still need ≥ 2.
-- The root and the seeded domain folders (`metadata.kind = domain`) never hold documents. Undecided at the root leaves the document in the queue (`undecided`); undecided in a domain folder asks the namer for a subject folder and reuses a sibling when the name matches (`rule:namer-match`), otherwise creates it (`rule:domain-new`). An empty domain folder gets its first subfolder by rule (`rule:empty-domain`).
-- Deeper, undecided means *here* (`undecided_here`) — the most specific place already confirmed.
-- Bulk arrivals are filed one per source folder; siblings follow a decided leader (`placed_with_group`) and stay queued behind an undecided one (`undecided_with_group`).
-- Node summaries record the document count they were written from (`payload.basis`); `enrich-cards` rewrites a node whose count moved by more than max(3, 20%) before summarising new nodes.
-
-## On your own desk — no server
-
-The engine does not know where its options come from. `LocalTree` answers the same hops over a directory on this
-machine: a folder is a node, a file is a document, and the cards are what the file system already knows — names,
-extensions, sizes, modified times, subtree counts, plus cheap facts read from the zip directory (xlsx sheet names,
-pptx slide count, Office titles, PDF page count) and the first line of small text files. No bytes of body text.
-
-```bash
-jevrag --local ~/Documents walk "Tower A rent roll"             # same hops and decision questions
-jevrag --local ~/Documents file --log ~/Documents/.jevrag/file.jsonl   # queue = ~/Documents/_inbox → files are moved on disk
-jevrag --local ~/Documents --inbox ~/Downloads file --dry-run    # any folder can be the inbox
-```
-
-Filing moves files. Every move is appended to `.jevrag/ledger.jsonl` (from, to, by, reason); a file a person moved
-by hand (`by=human`) is pinned and Jev never moves it again — the same contract as CloudBTL's placement ledger. Domain
-folders (never hold files directly, get a written description) are declared in `.jevrag/config.json`:
+The routing model does not receive the full document body when choosing a branch. After an enricher has added a summary and typed fields, a document card can look like this:
 
 ```json
-{"domains": {"업무": "회사 자료 — 계약·견적·제안·렌트롤", "개인": "개인 자료 — 영수증·사진"}}
+{
+  "label": "Q3 staffing quote",
+  "doc_type": "quote",
+  "summary": "Line items, quantities, unit prices, VAT status, and vendor",
+  "contains": ["fields.quote"],
+  "conditions": ["currency=KRW", "vatIncluded=false"],
+  "coverage": ["pages=3", "hasText=true"]
+}
 ```
 
-Folders that hold a `.git` are places to search, never filing destinations; `"no_filing": ["테스트*"]` in the config hides
-more, and `"descriptions": {"자료": "…"}` gives any folder the one line the model reads. An inbox above the root (root
-`~/Documents/Workspace`, inbox `~/Downloads`) is read at its top level only, so the root and sibling folders are never swept.
+Raw text, source URLs, credentials, and unbounded metadata are masked from routing state. After a document is chosen, executors may read the structured descriptors and page text required for the selected action and retain page-level evidence.
 
-A local enricher (Ollama, say) can write cards to `.jevrag/cards.jsonl` through the same `put_descriptors`; hops show
-them next to the baseline. Where things live, laptop to lake:
+See [Option Card](docs/OPTION-CARD.md) for the card schema and [Decision Loop](docs/DECISION-LOOP.md) for questions, rubrics, and fallback behavior.
 
-| | Laptop (`--local`) | CloudBTL (Smartlake) |
-|---|---|---|
-| Nodes / documents | folders / files | trees (`folders`, `filed`, `memory`, facets) / documents |
-| Baseline cards | `local-baseline`: file-system facts | `cloudbtl-baseline`: text, pages, sheets, rollups |
-| Enricher cards | `.jevrag/cards.jsonl` | descriptors under the enricher's producer |
-| Filing queue | the inbox folder | `GET /documents?notInTree=<tree>` |
-| Placement ledger | `.jevrag/ledger.jsonl` | `node_documents.placedBy/pinned` + audit `tree.move` |
-| Human override | move the file; it is pinned | `POST /trees/:t/move by=human`; pinned |
-| Engine, thresholds, rules, logs | **the same** | **the same** |
+## Use with CloudBTL
 
-### Keep filing as files arrive — `jevrag watch`
+[CloudBTL](https://cloudbtl.com) stores document bytes or source links, hashes, versions, logical trees, and producer-scoped descriptors. JevRAG consumes its option API:
+
+```text
+GET /api/options?tree=folders&at=<node-or-document>&limit=20
+```
+
+Configure a workspace:
 
 ```bash
-jevrag --local ~/Documents --inbox ~/Downloads watch --log ~/Documents/.jevrag/file.jsonl
-jevrag --local ~/Documents --inbox ~/Downloads watch --install-launchd     # macOS: LaunchAgent, KeepAlive; prints the launchctl lines
-jevrag watch --tree filed --once                                            # CloudBTL: one pass over GET /documents?notInTree=filed (cron)
+export CLOUDBTL_API_BASE=https://acme.cloudbtl.com
+export CLOUDBTL_TOKEN=cbtl_xxxxxxxx
+export TYPESAFE_API_KEY=...            # optional
+
+jevrag walk "Which rent roll contains the March tenant deposits?"
+jevrag gather "Every document needed to reconcile Project Aurora"
 ```
 
-One loop for both sources: poll the queue, file what is ready, sleep `--interval` (5 s). On a desk "ready" means the
-file has stopped changing for `--settle` seconds (3) — a download or a save in progress is left alone — and browser/Office
-temp names (`.crdownload`, `.part`, `~$…`) are never touched. Files lying directly in the inbox are filed one by one;
-a folder dropped into the inbox is filed as a group. A document undecided at the root stays in the queue and is not asked
-again for `--retry-after` seconds (3600) — its card may get richer meanwhile. Every placement goes to the same log as
-`jevrag file`; each cycle prints a one-line summary to stderr.
+At a node, options are child nodes followed by documents. At a document, options may become pages. Cards from deterministic extraction and external enrichers remain distinguishable by producer and version.
 
-## The loop, step by step
+## Choosing which card fields to expose
 
-1. **Candidates** — `Pipeline` pulls documents in scope from CloudBTL (`GET /api/me/proposals`,
-   filtered by batch / source / metadata) and, for each, the descriptor summary
-   (`GET /api/proposals/{id}/descriptors/summary`) plus `doc.meta` and any `fields.*` / `faq.*` payloads.
-2. **Option cards** — `options.build_card()` turns that into a compact, *masked* card: title, document
-   type, what it contains (kinds present), conditions (dates, currency, VAT flag when present),
-   coverage (pages, has text layer), and a one-line description. **Nothing else leaves the boundary**:
-   no raw bodies, no URLs and no credentials.
-3. **Decide** — `decide.py` asks Jev small, atomic questions:
-   - `score` each card 0–3 on "usefulness for answering this question" (rubric in `RUBRICS`)
-   - `choice` the action: `lookup` · `filter` · `count` · `compare` · `open` · `clarify` · `none`
-   - `noul` "does the question depend on a condition the cards do not settle (period, VAT, planned vs actual)?"
-   Low scores are respected: if no card reaches level 2, the pipeline returns `insufficient_options`
-   instead of executing the least-bad option.
-4. **Execute** — `execute.py` runs the chosen action on the chosen documents' structured descriptors.
-   Executors never call a model; they filter, count, average and compare typed values and keep the
-   `(document, page)` of every value they touch.
-5. **Answer + log** — the answer carries evidence; `log.py` appends one JSONL line with the question,
-   the cards shown, every Jev answer, what was executed and the outcome. That log is the input for
-   improving descriptions and rubrics — Jev does not learn on its own.
+Large descriptor sets can create noisy cards. `--fields auto` first presents available field families and coverage, then lets Jev select a profile for the retrieval run:
 
-## Descriptor conventions JevRAG understands
+```bash
+jevrag --local ~/Documents gather "Compare quote totals" --fields auto
+jevrag walk "March rent roll" --fields docType,period,entities
+```
 
-JevRAG reads whatever CloudBTL stores; it *understands* these kinds (all optional):
+Labels, document type, summary, and document counts remain visible as a fixed base. The chosen profile is recorded in the decision log.
 
-| kind | payload used |
-|---|---|
-| `doc.meta` | `documentType`, `pageCount`, `hasTextLayer` |
-| `text.page` | for `open`/`lookup` evidence snippets (never sent to Jev) |
-| `class.doc` | `docType`, `stage`, `eventType`, `industry` |
-| `fields.quote` | `items[]` with `name`, `qty`, `unitPrice`, `amount`, `currency`, `vatIncluded`, `vendor`, `page` |
-| `fields.contract` | `parties`, `startDate`, `endDate`, `amount`, `clauses[]`, `page` |
-| `fields.result` | `visitors`, `sessions`, `revenue`, `kpi[]`, `page` |
-| `fields.proposal` | `brand`, `category`, `eventType`, `budget`, `venue`, `programs[]` |
-| `faq.doc` | `items[]` with `q`, `a`, `page` — matched before anything else for how-to questions |
-| `context.*` | `projectCode`, `client`, `stage`, `won`, `margin` (provenance from outside the file) |
+## Filing documents
 
-See `docs/OPTION-CARD.md` for the card schema and `docs/DECISION-LOOP.md` for the questions and rubrics.
+Filing walks the tree in reverse: the incoming document becomes the question and destination folders become options.
 
-## Evaluation
+```bash
+# Preview local moves first
+jevrag --local ~/Documents --inbox ~/Downloads file --dry-run
 
-`eval/` holds a question taxonomy derived from real internal Q&A channels (intent × operation × time
-horizon × where the answer lives) and a fixture format. Measure three things, independently reviewed:
-missing-evidence rate, opens until first useful evidence, end-to-end time. Do not read a rank change
-as an accuracy gain.
+# Apply and record moves
+jevrag --local ~/Documents --inbox ~/Downloads file \
+  --log ~/Documents/.jevrag/file.jsonl
+```
+
+Local filing moves files on disk. Every move is appended to `.jevrag/ledger.jsonl` with its old and new path. There is no automatic rollback; use that record to restore a move manually. Placements recorded through the source with `by=human` are pinned so Jev will not move them again.
+
+Repositories are searchable but are never filing destinations. Additional exclusions and folder descriptions live in `.jevrag/config.json`:
+
+```json
+{
+  "domains": {
+    "Work": "Contracts, proposals, reports, and financial records",
+    "Personal": "Receipts, photos, and personal documents"
+  },
+  "no_filing": ["Archive*", "Scratch*"],
+  "descriptions": {
+    "Reference": "Material used for lookup, never project delivery"
+  }
+}
+```
+
+Cloud filing uses logical tree attachments rather than moving source files:
+
+```bash
+jevrag seed-trees --skeleton ./examples/company-skeleton.json
+jevrag file --tree filed --limit 300 --log file.jsonl
+```
+
+The skeleton controls domain names, descriptions, topics, and optional inheritance. The engine supplies the mechanism without embedding an organization chart.
+
+## Watch an inbox
+
+```bash
+# Local polling
+jevrag --local ~/Documents --inbox ~/Downloads watch \
+  --log ~/Documents/.jevrag/file.jsonl
+
+# Install as a macOS LaunchAgent
+jevrag --local ~/Documents --inbox ~/Downloads watch --install-launchd
+
+# One cloud pass, suitable for cron
+jevrag watch --tree filed --once
+```
+
+The watcher waits for files to stop changing, ignores browser and Office temporary names, groups dropped folders, and leaves undecided items in the queue for a later pass.
+
+## Enrich cards with a local model
+
+Deterministic cards are useful headers; a short content summary can make a tree much easier to navigate. `enrich-cards` reads extracted text from CloudBTL, asks a local Ollama model for structured output, and writes `card.doc` and `card.node` descriptors under producer `llm-cards`.
+
+```bash
+jevrag enrich-cards \
+  --model qwen3.6:35b-a3b \
+  --limit 600 \
+  --max-minutes 360 \
+  --log enrich.jsonl
+```
+
+One failed document does not stop the run. Node cards are refreshed when their underlying document counts change materially.
+
+## Descriptor conventions
+
+All descriptors are optional. JevRAG currently recognizes these families:
+
+| Kind | Used for |
+| --- | --- |
+| `doc.meta` | file type, page count, text availability |
+| `text.page` | post-selection lookup and evidence snippets |
+| `class.doc` | document type, stage, event type, industry |
+| `fields.quote` | items, quantities, unit prices, totals, VAT, vendor |
+| `fields.contract` | parties, dates, amount, clauses |
+| `fields.result` | visitors, sessions, revenue, KPIs |
+| `fields.proposal` | brand, category, event type, budget, venue, programs |
+| `faq.doc` | page-linked questions and answers |
+| `context.*` | project, client, stage, outcome, or other external context |
+
+Unknown descriptors remain available to other consumers; JevRAG does not need to own every enrichment schema.
+
+## Decision logs and evaluation
+
+Each run can append a JSONL record containing:
+
+- the original question
+- every option shown at each hop
+- scores, confidence, and selected actions
+- the resulting path or placement
+- evidence and failure status
+
+```bash
+jevrag replay decisions.jsonl
+```
+
+The [evaluation harness](eval/README.md) measures candidate coverage, decision quality, and final evidence separately. Reference evidence must be assembled independently of the retriever; a ranking change alone is not treated as an accuracy gain.
 
 ## Status
 
-Reference implementation, v0.2. Local walk, gather, filing, watch, card enrichment and automatic field profiling run end to end; the same engine can use a desktop directory or CloudBTL trees. The CloudBTL side (landing, descriptors, cards, trees and placement ledger) is live. `fields.*`, `faq.*` and entity-connection producers remain external enrichers under development. The heuristic chooser keeps the loop runnable without a TypeSafe key; it is not a substitute for Jev.
+JevRAG is a reference implementation at v0.2. Local and CloudBTL-backed walk, gather, filing, watch, card enrichment, field profiling, and decision logging run end to end. Structured field, FAQ, and entity-linking producers are external enrichers and remain deployment-specific.
 
-## 한국어 요약
+## Development
 
-결정 모델(Jev)은 **잘 설명된 선택지**가 있을 때만 빠르고 싸고 감사 가능합니다. 벡터 검색은 가장 가까운 것을 주고,
-CloudBTL은 문서마다 "무엇을 담고 있고, 어떤 조건이고, 어느 페이지에서 왔는지"가 붙은 선택지 카드를 줍니다.
-JevRAG는 그 사이의 루프입니다: 카드 만들기 → Jev가 자료·행동 선택 → 코드가 걸러·세어·비교 → 근거 붙은 답 → 결정 로그.
+```bash
+pip install -e '.[dev]'
+pytest -q
+```
+
+## Security
+
+Option cards are a data boundary, not an access-control boundary. The source system must still enforce document and tenant permissions before returning candidates.
+
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
