@@ -149,6 +149,10 @@ folders (never hold files directly, get a written description) are declared in `
 {"domains": {"업무": "회사 자료 — 계약·견적·제안·렌트롤", "개인": "개인 자료 — 영수증·사진"}}
 ```
 
+Folders that hold a `.git` are places to search, never filing destinations; `"no_filing": ["테스트*"]` in the config hides
+more, and `"descriptions": {"자료": "…"}` gives any folder the one line the model reads. An inbox above the root (root
+`~/Desktop/Desktopped`, inbox `~/Desktop`) is read at its top level only, so the root and sibling folders are never swept.
+
 A local enricher (Ollama, say) can write cards to `.jevrag/cards.jsonl` through the same `put_descriptors`; hops show
 them next to the baseline. Where things live, laptop to lake:
 
