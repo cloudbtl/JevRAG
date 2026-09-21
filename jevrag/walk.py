@@ -101,6 +101,9 @@ def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
                 facts["inside"] = "; ".join(str(x) for x in base["childLabels"][:6])
             if enr.get("period"):
                 facts["period"] = enr["period"]
+            meta = base.get("metadata") if isinstance(base.get("metadata"), dict) else {}
+            if not summary and meta.get("description"):
+                summary = str(meta["description"])          # 뼈대 노드의 사람이 쓴 설명
             if not summary and base.get("sampleTitles"):
                 summary = "e.g. " + "; ".join(str(t) for t in base["sampleTitles"][:3])
         elif o["kind"] == "document":
