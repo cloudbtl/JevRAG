@@ -91,7 +91,8 @@ class Namer:
         """depth = the new folder's depth. 1~2 = subject folders (건물·프로젝트·브랜드·업무), deeper = document kinds."""
         if self.llm is None:
             return self.fallback(question)
-        level = ("건물·프로젝트·브랜드·업무 단위(예: 더갤러리832, SEI타워, 에버랜드 팝업). 문서 종류로 짓지 않는다." if depth <= 2
+        level = ("건물·프로젝트·업무 단위(예: 더갤러리832, SEI타워, 에버랜드 팝업). 문서 종류(계약서·의향서)나 입점 브랜드명으로 짓지 않는다. "
+                 "문서 경로에 건물·프로젝트 폴더명이 있으면 그것을 쓴다(예: '#260220 더갤러리832' → '더갤러리832')." if depth <= 2
                  else "문서 종류 단위(예: 임대차계약서, 입점의향서, IM, 렌트롤, 견적서). 한 문서가 아니라 같은 부류가 모일 이름.")
         schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
         try:
