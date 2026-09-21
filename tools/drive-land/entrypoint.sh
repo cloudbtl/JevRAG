@@ -25,13 +25,29 @@ if [ "$MODE" = "inventory" ]; then
   exit 0
 fi
 export RCLONE=rclone
-echo "$drives_json" | python3 -c 'import json,sys; [print(x["id"]+"|"+x["name"]) for x in json.load(sys.stdin)]' | while IFS='|' read -r id name; do
-  if [ -n "$DRIVE_IDS" ] && ! echo ",$DRIVE_IDS," | grep -q ",$id,"; then continue; fi
+# 병렬 실행: Cloud Run Job 의 task 가 여러 개면 task i 는 DRIVE_IDS 의 i, i+N, i+2N … 번째 드라이브를 맡는다(순서 = 우선순위).
+# DRIVE_IDS 가 비면 backend drives 순서 전부. 사진 같은 대용량 드라이브는 DRIVE_IDS 로 빼둘 수 있다.
+TASK_INDEX="${CLOUD_RUN_TASK_INDEX:-0}"; TASK_COUNT="${CLOUD_RUN_TASK_COUNT:-1}"
+ordered="$(python3 - "$drives_json" "$DRIVE_IDS" <<'PYEOF'
+import json, sys
+drives = {x["id"]: x["name"] for x in json.loads(sys.argv[1])}
+want = [i for i in sys.argv[2].split(",") if i] or list(drives)
+for i in want:
+    if i in drives:
+        print(i + "|" + drives[i])
+PYEOF
+)"
+n=0
+echo "$ordered" | while IFS='|' read -r id name; do
+  [ -z "$id" ] && continue
+  if [ $((n % TASK_COUNT)) -ne "$TASK_INDEX" ]; then n=$((n+1)); continue; fi
+  n=$((n+1))
   meta="$(python3 -c 'import json,sys; print(json.dumps({"drive": sys.argv[1], "driveId": sys.argv[2]}, ensure_ascii=False))' "$name" "$id")"
+  echo "{"event":"task_drive","task":$TASK_INDEX,"drive":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1],ensure_ascii=False))' "$name")}"
   python3 /app/rclone_land.py --remote "gdrive,team_drive=$id:" --prefix "$name" --source gdrive --metadata "$meta" \
     --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-$id.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" || true
 done
-if [ "$INCLUDE_SHARED_WITH_ME" = "1" ]; then
+if [ "$INCLUDE_SHARED_WITH_ME" = "1" ] && [ "$TASK_INDEX" = "0" ]; then
   python3 /app/rclone_land.py --remote 'gdrive,shared_with_me=true:' --prefix 'shared-with-me' --source gdrive --metadata '{"drive":"shared-with-me"}' \
     --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-shared-with-me.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" || true
 fi
