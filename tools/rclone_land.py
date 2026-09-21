@@ -163,7 +163,7 @@ def main() -> int:
         parts, refs, keys = [], [], []
         t_fetch = time.time()
         try:
-            blobs = fetch_group(ns.remote, [f["Path"] for f in group], state_path.parent / ".rclone_land_tmp")
+            blobs = fetch_group(ns.remote, [f["Path"] for f in group], state_path.parent / ("." + state_path.stem + ".tmp"))
         except subprocess.CalledProcessError as e:
             log({"event": "fetch_failed", "files": len(group), "error": (e.stderr.decode(errors="replace")[-300:] if e.stderr else str(e))})
             blobs = {}
@@ -206,7 +206,7 @@ def main() -> int:
         f = big[j]; j += 1
         t0 = time.time()
         try:
-            res = direct_land(client, ns.remote, f, state_path.parent / ".rclone_land_tmp", prefix=prefix, source=ns.source, metadata=metadata, batch=batch)
+            res = direct_land(client, ns.remote, f, state_path.parent / ("." + state_path.stem + ".tmp"), prefix=prefix, source=ns.source, metadata=metadata, batch=batch)
             st = "deduplicated" if res.get("deduplicated") else "landed"
             state[key_of(f)] = {"status": st, "id": (res.get("proposal") or {}).get("id"), "baseline": (res.get("baseline") or {}).get("status"), "direct": True}
             landed += st == "landed"; dedup += st == "deduplicated"
