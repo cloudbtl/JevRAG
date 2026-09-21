@@ -166,6 +166,48 @@ class LocalTree:
     def invalidate(self) -> None:
         self._stats = None
 
+    def _apply_move(self, src_rel: str | None, dest_rel: str, name: str, mtime: float) -> None:
+        """Keep the cached statistics in step with one move instead of re-walking the whole tree (which can be 100k+ files)."""
+        if self._stats is None:
+            return
+        stats = self._stats
+        t = doc_type(name)
+
+        def ancestors(d: str) -> list[str]:
+            out = [d]
+            while d:
+                d = d.rsplit("/", 1)[0] if "/" in d else ""
+                out.append(d)
+            return out
+
+        if src_rel is not None and src_rel in stats:
+            stats[src_rel].docs = max(0, stats[src_rel].docs - 1)
+            for a in ancestors(src_rel):
+                st = stats.get(a)
+                if st:
+                    st.docs_total = max(0, st.docs_total - 1)
+                    if st.by_type.get(t):
+                        st.by_type[t] -= 1
+                        if st.by_type[t] == 0:
+                            del st.by_type[t]
+        # new folders along the destination chain
+        chain = ancestors(dest_rel)
+        for d in reversed(chain):
+            if d not in stats:
+                stats[d] = _DirStats()
+                parent = d.rsplit("/", 1)[0] if "/" in d else ""
+                if d and d not in stats.setdefault(parent, _DirStats()).children:
+                    stats[parent].children.append(d)
+        stats[dest_rel].docs += 1
+        if len(stats[dest_rel].titles) < 5:
+            stats[dest_rel].titles.append(Path(name).stem)
+        for a in chain:
+            st = stats[a]
+            st.docs_total += 1
+            st.by_type[t] = st.by_type.get(t, 0) + 1
+            st.min_m = mtime if st.min_m is None or mtime < st.min_m else st.min_m
+            st.max_m = mtime if st.max_m is None or mtime > st.max_m else st.max_m
+
     # ── cards ──
     def _domain(self, rel: str) -> dict[str, Any]:
         """Node metadata from .jevrag/config.json: domains (kind=domain + description), no_filing (globs), plus repo detection."""
@@ -216,13 +258,25 @@ class LocalTree:
         card.update(cheap_facts(p, s.st_size))
         return card
 
+    def _cards_index(self) -> dict[str, list[dict[str, Any]]]:
+        """.jevrag/cards.jsonl grouped by target, re-read only when the file changes."""
+        p = self.meta_dir / "cards.jsonl"
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            return {}
+        cache = getattr(self, "_cards_cache", None)
+        if cache and cache[0] == m:
+            return cache[1]
+        idx: dict[str, list[dict[str, Any]]] = {}
+        for rec in self._read_jsonl(p):
+            idx.setdefault(str(rec.get("target")), []).append({k: rec.get(k) for k in ("kind", "page", "producer", "producerVersion", "payload")})
+        self._cards_cache = (m, idx)
+        return idx
+
     def _extra_cards(self, target: str) -> list[dict[str, Any]]:
         """Cards a local enricher wrote: .jevrag/cards.jsonl lines {target, kind, page, producer, producerVersion, payload}."""
-        out = []
-        for rec in self._read_jsonl(self.meta_dir / "cards.jsonl"):
-            if rec.get("target") == target:
-                out.append({k: rec.get(k) for k in ("kind", "page", "producer", "producerVersion", "payload")})
-        return out
+        return list(self._cards_index().get(target, []))
 
     def _option_node(self, rel: str) -> dict[str, Any]:
         card = self.node_card(rel)
@@ -340,7 +394,11 @@ class LocalTree:
             shutil.move(str(src), str(dest))
         rel_dest = self.rel(dest)
         self._append_ledger({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": "move", "doc": rel_src, "to": rel_dest, "path": to_path, "by": by, "reason": reason})
-        self.invalidate()
+        src_dir_rel = rel_src.rsplit("/", 1)[0] if ("/" in rel_src and not rel_src.startswith("/")) else ("" if not rel_src.startswith("/") else None)
+        try:
+            self._apply_move(src_dir_rel, rel_dest.rsplit("/", 1)[0] if "/" in rel_dest else "", dest.name, dest.stat().st_mtime)
+        except Exception:  # noqa: BLE001 — fall back to a full re-walk
+            self.invalidate()
         return {"ok": True, "nodeId": "node:" + to_path if to_path else "root", "path": to_path, "attached": True, "by": by, "pinned": by == "human", "document": "doc:" + rel_dest}
 
     def _rel_or_abs(self, p: Path) -> str:
@@ -351,7 +409,17 @@ class LocalTree:
 
     # ── ledger (placements) ──
     def ledger(self) -> list[dict[str, Any]]:
-        return self._read_jsonl(self.meta_dir / "ledger.jsonl")
+        p = self.meta_dir / "ledger.jsonl"
+        try:
+            m = p.stat().st_mtime_ns
+        except OSError:
+            return []
+        cache = getattr(self, "_ledger_cache", None)
+        if cache and cache[0] == m:
+            return cache[1]
+        rows = self._read_jsonl(p)
+        self._ledger_cache = (m, rows)
+        return rows
 
     def _append_ledger(self, rec: dict[str, Any]) -> None:
         self.meta_dir.mkdir(exist_ok=True)
