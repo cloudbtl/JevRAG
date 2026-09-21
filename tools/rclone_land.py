@@ -29,8 +29,11 @@ RCLONE = os.getenv("RCLONE", "rclone")
 
 
 def is_junk(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return name in (".DS_Store", "Thumbs.db", "desktop.ini") or name.startswith(("~$", "._", "."))
+    parts = path.split("/")
+    name = parts[-1]
+    if any(p.startswith(".") for p in parts):  # 숨김 파일·폴더(.claude, .git …)
+        return True
+    return name in ("Thumbs.db", "desktop.ini") or name.startswith(("~$", "._"))
 
 
 def listing(remote: str) -> list[dict]:
