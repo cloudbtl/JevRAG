@@ -41,8 +41,25 @@ def listing(remote: str) -> list[dict]:
     return json.loads(out or "[]")
 
 
-def cat(remote: str, path: str) -> bytes:
-    return subprocess.run([RCLONE, "cat", remote.rstrip("/") + "/" + path], capture_output=True, check=True).stdout
+def fetch_group(remote: str, paths: list[str], tmp: Path) -> dict[str, bytes]:
+    """Copy a group of files in parallel into tmp (one rclone process, --transfers 8), read them, delete them.
+    Per-file `rclone cat` pays process start + auth + path lookup every time; a grouped copy is ~10x faster."""
+    import shutil
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    listfile = tmp.parent / (tmp.name + ".list")
+    listfile.write_text(chr(10).join(paths) + chr(10), encoding="utf-8")
+    subprocess.run([RCLONE, "copy", remote, str(tmp), "--files-from", str(listfile), "--no-traverse", "--transfers", "8", "--checkers", "8", "-q"],
+                   capture_output=True, check=True)
+    out: dict[str, bytes] = {}
+    for p in paths:
+        f = tmp / p
+        if f.exists():
+            out[p] = f.read_bytes()
+    shutil.rmtree(tmp, ignore_errors=True)
+    listfile.unlink(missing_ok=True)
+    return out
 
 
 def key_of(f: dict) -> str:
@@ -115,11 +132,17 @@ def main() -> int:
         if not group:  # a single file exactly at the cap edge
             group.append(todo[i]); i += 1
         parts, refs, keys = [], [], []
+        t_fetch = time.time()
+        try:
+            blobs = fetch_group(ns.remote, [f["Path"] for f in group], state_path.parent / ".rclone_land_tmp")
+        except subprocess.CalledProcessError as e:
+            log({"event": "fetch_failed", "files": len(group), "error": (e.stderr.decode(errors="replace")[-300:] if e.stderr else str(e))})
+            blobs = {}
+        fetch_ms = round((time.time() - t_fetch) * 1000)
         for f in group:
-            try:
-                data = cat(ns.remote, f["Path"])
-            except subprocess.CalledProcessError as e:
-                state[key_of(f)] = {"status": "read_failed", "error": e.stderr.decode(errors="replace")[-200:] if e.stderr else str(e)}
+            data = blobs.get(f["Path"])
+            if data is None:
+                state[key_of(f)] = {"status": "read_failed"}
                 failed += 1
                 log({"event": "read_failed", "path": f["Path"]})
                 continue
@@ -147,7 +170,7 @@ def main() -> int:
             else:
                 state[k] = {"status": "failed", "error": item.get("error")}
                 failed += 1
-        log({"event": "batch", "files": len(parts), "bytes": sum(len(p[1][1]) for p in parts), "ms": round((time.time() - t0) * 1000), "counts": res.get("counts")})
+        log({"event": "batch", "files": len(parts), "bytes": sum(len(p[1][1]) for p in parts), "fetch_ms": fetch_ms, "land_ms": round((time.time() - t0) * 1000), "counts": res.get("counts")})
         save()
     log({"event": "done", "landed": landed, "deduplicated": dedup, "failed": failed, "remaining": len(todo) - i})
     return 0
