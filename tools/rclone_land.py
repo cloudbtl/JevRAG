@@ -7,7 +7,8 @@
 For every file under the remote path (recursively) that is not yet in the state file: read it with
 `rclone cat`, pack files into requests under 30MB / 50 files, POST /api/documents/land with
 sourceRefs = the remote-relative path (so the folders tree mirrors the source), dedupe on. Files over
-the request cap are recorded as `oversize` and skipped (a direct-to-storage path is needed for those).
+the request cap take the direct path instead: POST /land/init -> PUT the bytes to the returned GCS session
+URL -> POST /land/commit (hash, dedupe, row, baseline happen server-side). Up to 2 GiB per file.
 State is keyed by path + size + mtime, so re-running only lands new or changed files.
 Requires: rclone on PATH (or RCLONE env), CLOUDBTL_API_BASE, CLOUDBTL_TOKEN (full scope).
 """
@@ -25,6 +26,7 @@ import httpx
 
 REQUEST_BYTE_CAP = 30 * 1024 * 1024
 REQUEST_FILE_CAP = 50
+MAX_DIRECT_BYTES = 2 * 1024 * 1024 * 1024
 RCLONE = os.getenv("RCLONE", "rclone")
 
 
@@ -60,6 +62,27 @@ def fetch_group(remote: str, paths: list[str], tmp: Path) -> dict[str, bytes]:
     shutil.rmtree(tmp, ignore_errors=True)
     listfile.unlink(missing_ok=True)
     return out
+
+
+def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix: str, source: str, metadata: dict, batch: str) -> dict:
+    """init -> rclone copy to tmp -> PUT to the session URL (no API/proxy in the byte path) -> commit."""
+    init = client.post("/api/documents/land/init", json={"filename": f["Name"], "size": f["Size"]})
+    init.raise_for_status()
+    ticket = init.json()
+    blobs = fetch_group(remote, [f["Path"]], tmp)
+    data = blobs.get(f["Path"])
+    if data is None:
+        raise RuntimeError("read_failed")
+    with httpx.Client(timeout=1800) as up:
+        r = up.put(ticket["uploadUrl"], content=data, headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(data))})
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"put_failed http_{r.status_code}")
+    commit = client.post("/api/documents/land/commit", json={
+        "uploadId": ticket["uploadId"], "source": source, "sourceRef": (prefix + "/" if prefix else "") + f["Path"],
+        "metadata": metadata, "ingestBatch": batch, "linkMode": "none", "dedupe": True, "runBaseline": True,
+    })
+    commit.raise_for_status()
+    return commit.json()
 
 
 def key_of(f: dict) -> str:
@@ -98,27 +121,33 @@ def main() -> int:
         tmp.replace(state_path)
 
     files = listing(ns.remote)
-    todo, oversize, junk, done = [], 0, 0, 0
+    todo, big, oversize, junk, done = [], [], 0, 0, 0
     for f in files:
         if is_junk(f["Path"]):
             junk += 1
             continue
         k = key_of(f)
-        if k in state and state[k].get("status") in ("landed", "deduplicated", "oversize", "empty"):
+        st = state.get(k, {}).get("status")
+        if st in ("landed", "deduplicated", "empty") or (st == "oversize" and f.get("Size", 0) > MAX_DIRECT_BYTES):
             done += 1
             continue
         if not f.get("Size"):
             state[k] = {"status": "empty"}
             continue
-        if f["Size"] > REQUEST_BYTE_CAP:
+        if f["Size"] > MAX_DIRECT_BYTES:
             state[k] = {"status": "oversize", "size": f["Size"]}
             oversize += 1
             continue
+        if f["Size"] > REQUEST_BYTE_CAP:
+            big.append(f)
+            continue
         todo.append(f)
     todo = todo[: ns.limit]
-    log({"event": "plan", "remote": ns.remote, "files": len(files), "already": done, "junk": junk, "oversize_new": oversize, "todo": len(todo), "bytes": sum(f["Size"] for f in todo)})
+    big = big[: max(0, ns.limit - len(todo))]
+    log({"event": "plan", "remote": ns.remote, "files": len(files), "already": done, "junk": junk, "too_large": oversize, "todo": len(todo), "bytes": sum(f["Size"] for f in todo),
+         "direct": len(big), "direct_bytes": sum(f["Size"] for f in big)})
     save()
-    if ns.dry_run or not todo:
+    if ns.dry_run or not (todo or big):
         return 0
 
     client = httpx.Client(base_url=base, timeout=300, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
@@ -172,7 +201,22 @@ def main() -> int:
                 failed += 1
         log({"event": "batch", "files": len(parts), "bytes": sum(len(p[1][1]) for p in parts), "fetch_ms": fetch_ms, "land_ms": round((time.time() - t0) * 1000), "counts": res.get("counts")})
         save()
-    log({"event": "done", "landed": landed, "deduplicated": dedup, "failed": failed, "remaining": len(todo) - i})
+    j = 0
+    while j < len(big) and time.time() < deadline:
+        f = big[j]; j += 1
+        t0 = time.time()
+        try:
+            res = direct_land(client, ns.remote, f, state_path.parent / ".rclone_land_tmp", prefix=prefix, source=ns.source, metadata=metadata, batch=batch)
+            st = "deduplicated" if res.get("deduplicated") else "landed"
+            state[key_of(f)] = {"status": st, "id": (res.get("proposal") or {}).get("id"), "baseline": (res.get("baseline") or {}).get("status"), "direct": True}
+            landed += st == "landed"; dedup += st == "deduplicated"
+            log({"event": "direct", "path": f["Path"], "bytes": f["Size"], "ms": round((time.time() - t0) * 1000), "status": st, "baseline": (res.get("baseline") or {}).get("status")})
+        except Exception as e:  # noqa: BLE001
+            state[key_of(f)] = {"status": "failed", "error": str(e)[:300], "direct": True}
+            failed += 1
+            log({"event": "direct_failed", "path": f["Path"], "bytes": f["Size"], "error": str(e)[:300]})
+        save()
+    log({"event": "done", "landed": landed, "deduplicated": dedup, "failed": failed, "remaining": (len(todo) - i) + (len(big) - j)})
     return 0
 
 
