@@ -45,3 +45,31 @@ class CloudBTL:
         """Everything JevRAG executes on: doc.meta, class.*, fields.*, faq.*, context.* (never text.page bodies)."""
         rows = self.descriptors(doc_id)
         return [d for d in rows if str(d.get("kind", "")).startswith(("doc.meta", "class.", "fields.", "faq.", "context.", "summary."))]
+
+    # ── 1.2: browse + trees ──
+    def list_documents(self, *, node: str | None = None, batch: str | None = None, source: str | None = None, q: str | None = None,
+                       kind: str | None = None, missing_producer: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """GET /api/documents with server-side filters and cursor paging (spec 1.1+)."""
+        params = {k: v for k, v in (("node", node), ("batch", batch), ("source", source), ("q", q), ("kind", kind),
+                                     ("missingProducer", missing_producer)) if v}
+        params["limit"] = str(min(200, max(1, limit)))
+        out: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            if cursor:
+                params["cursor"] = cursor
+            r = self._c.get("/api/documents", params=params); r.raise_for_status()
+            body = r.json()
+            out.extend(body.get("documents", []))
+            cursor = body.get("nextCursor")
+            if not cursor:
+                return out
+
+    def trees(self) -> list[dict[str, Any]]:
+        r = self._c.get("/api/trees"); r.raise_for_status()
+        return r.json().get("trees", [])
+
+    def options(self, *, tree: str = "folders", at: str = "root", limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        """One hop: child nodes → documents (or pages of a document), each with its cards."""
+        r = self._c.get("/api/options", params={"tree": tree, "at": at, "limit": str(limit), "offset": str(offset)}); r.raise_for_status()
+        return r.json()

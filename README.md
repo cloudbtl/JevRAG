@@ -46,6 +46,7 @@ jevrag options prop_abc123                       # see the option card CloudBTL 
 jevrag ask "average unit price for staffing agencies in our quotes"
 jevrag ask "which contracts expire within 6 months" --scope batch_2026_09
 jevrag replay decisions.jsonl                     # re-run logged questions against current descriptors
+jevrag walk "which rent roll has SEI tower tenants"  # hop through a CloudBTL tree (see below)
 ```
 
 ```python
@@ -56,6 +57,34 @@ print(ans.text)            # answer text assembled from executed facts
 print(ans.evidence)        # [(document id, page, kind, producer), ...]
 print(ans.decisions)       # every Jev question asked, its typed answer and confidence
 ```
+
+## Walking a tree (CloudBTL spec 1.2)
+
+CloudBTL keeps *trees* — option hierarchies whose nodes (folders, batches, facet values, clusters)
+and documents carry **cards** (`card.node`, `card.doc`, `card.page`). One hop is
+`GET /api/options?tree=folders&at=<node|document>&limit=20`: the child nodes, then the documents
+at that node (or the pages of a document), each with its cards from every producer — the
+deterministic baseline header plus whatever an enricher wrote (a one-line LLM summary, say).
+
+`jevrag walk` asks Jev at every hop to score each option 0–3 on "should we go here to answer the
+question", descends into the best one, and stops on a document (or page with `--pages`), when
+nothing scores ≥ 2, or after `--max-hops`. Twenty options × six hops covers 20^6 places while the
+model only ever sees twenty cards.
+
+```bash
+jevrag walk "SEI타워 임차인별 보증금과 임대료" --tree folders --fan-out 20 --max-hops 6
+# → path ["[LM]", "[기타자료]", "(구)Jason 자료", "LR", "Leasing", "끝", "SEI타워", "퍼스텝16호_Rent Roll…"]
+```
+
+```python
+from jevrag import CloudBTL, walk
+w = walk("SEI타워 임차인별 보증금과 임대료", CloudBTL())
+w.path, w.status, w.target.id      # labels chosen per hop · document|page|leaf|insufficient_options|max_hops · prop_…
+```
+
+The walker never sees bodies: node cards carry counts, type mix, landed range and sample titles;
+document cards carry title, type, page count, sheet names, metadata and a 120-char headline;
+enricher summaries (`card.*` under another producer) take precedence in the `summary` field.
 
 ## The loop, step by step
 
