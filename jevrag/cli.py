@@ -133,7 +133,7 @@ def main(argv=None) -> int:
         if ns.install_launchd:
             from pathlib import Path
             argv_clean = [a for a in (argv if argv is not None else sys.argv[1:]) if a != "--install-launchd"]
-            log_path = ns.log or str(Path.home() / "Library/Logs/jevrag-watch.log")
+            log_path = str(Path.home() / "Library/Logs/jevrag-watch.log")   # process output; the decision log (--log) is a separate JSONL
             plist = Path.home() / "Library/LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
             plist.parent.mkdir(parents=True, exist_ok=True)
             plist.write_text(launchd_plist(argv_clean, log_path), encoding="utf-8")
