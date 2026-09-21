@@ -106,6 +106,28 @@ failure never stops the run. A 35B-A3B MoE on an M4 Pro does a document in ~10 s
 new documents fit in one night. Precise field extraction (`fields.*`) is a different job for a
 stronger model and stays out of this enricher.
 
+## Filing — walking in reverse
+
+`jevrag file` puts documents *into* a Jev-managed tree the way a person files them: the document's own
+card is the question, the options at each hop are the child folders plus **여기에 둔다** (here) and
+**새 폴더** (new folder, named by the local model). Every placement goes to
+`POST /api/trees/:tree/move` with `by=jev` and to a JSONL decision log (cards seen, scores, path), so
+people can review, move and pin — human moves pin the document and Jev never moves it again.
+
+```bash
+jevrag seed-trees                                  # memory (도메인→주제) and filed (도메인 folders with a written description)
+jevrag file --tree filed --group-by-folder --limit 300 --log file.jsonl   # queue = GET /documents?notInTree=filed
+jevrag file --tree filed --node <folders node id> --dry-run              # one source folder, no writes
+```
+
+Rules learned from the first live runs (the log names them in `hops[].source`):
+
+- Folders enter at score ≥ 1.5 (`NODE_MIN`); a folder card only *locates*, so the rubric's top level is out of reach for it. Documents, *here* and *stop* still need ≥ 2.
+- The root and the seeded domain folders (`metadata.kind = domain`) never hold documents. Undecided at the root leaves the document in the queue (`undecided`); undecided in a domain folder asks the namer for a subject folder and reuses a sibling when the name matches (`rule:namer-match`), otherwise creates it (`rule:domain-new`). An empty domain folder gets its first subfolder by rule (`rule:empty-domain`).
+- Deeper, undecided means *here* (`undecided_here`) — the most specific place already confirmed.
+- Bulk arrivals are filed one per source folder; siblings follow a decided leader (`placed_with_group`) and stay queued behind an undecided one (`undecided_with_group`).
+- Node summaries record the document count they were written from (`payload.basis`); `enrich-cards` rewrites a node whose count moved by more than max(3, 20%) before summarising new nodes.
+
 ## The loop, step by step
 
 1. **Candidates** — `Pipeline` pulls documents in scope from CloudBTL (`GET /api/me/proposals`,
@@ -155,7 +177,7 @@ as an accuracy gain.
 
 ## Status
 
-Reference implementation, v0.1. The CloudBTL side (landing, descriptors, webhooks, ledger) is live;
+Reference implementation, v0.2. The CloudBTL side (landing, descriptors, webhooks, ledger) is live;
 `fields.*` and `faq.*` producers are being built as external enrichers. The heuristic chooser exists
 so the loop runs end to end without a TypeSafe key; it is not a substitute for Jev.
 
