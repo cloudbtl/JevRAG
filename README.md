@@ -86,6 +86,26 @@ The walker never sees bodies: node cards carry counts, type mix, landed range an
 document cards carry title, type, page count, sheet names, metadata and a 120-char headline;
 enricher summaries (`card.*` under another producer) take precedence in the `summary` field.
 
+## Nightly card enricher (local LLM)
+
+Baseline cards are deterministic headers. `jevrag enrich-cards` adds the one-line *content* summary a
+hop needs, with a local Ollama model, under producer `llm-cards` (so consumers can weigh it
+differently from `cloudbtl-baseline`):
+
+```bash
+export CLOUDBTL_API_BASE=… CLOUDBTL_TOKEN=cbtl_…   # full-scope token: it writes descriptors
+jevrag enrich-cards --model qwen3.6:35b-a3b --limit 600 --max-minutes 360 --log enrich.jsonl
+```
+
+Documents first (`GET /api/documents?missingProducer=llm-cards&kind=text.page` → first ~7k chars of
+`text.page` in page order → `{summary, docType, topics, entities, period, language}` →
+`PUT /api/proposals/:id/descriptors`), then nodes deepest-first (label, path, type mix, sample titles
+and the summaries of documents inside → `{summary, topics, entities, period}` →
+`PUT /api/nodes/:id/descriptors`). Structured output (`format` = JSON schema, `think: false`); one
+failure never stops the run. A 35B-A3B MoE on an M4 Pro does a document in ~10 s, so a few hundred
+new documents fit in one night. Precise field extraction (`fields.*`) is a different job for a
+stronger model and stays out of this enricher.
+
 ## The loop, step by step
 
 1. **Candidates** — `Pipeline` pulls documents in scope from CloudBTL (`GET /api/me/proposals`,
