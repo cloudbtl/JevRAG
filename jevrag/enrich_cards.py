@@ -126,6 +126,21 @@ def _node_prompt(at: dict[str, Any], card: dict[str, Any], children: list[str], 
     )
 
 
+STALE_ABS = 3        # 노드 요약을 다시 만드는 문서 수 변화 — 절대치와
+STALE_REL = 0.2      # 비율 중 큰 쪽을 넘으면
+
+
+def _fresh(cards: list[dict[str, Any]], docs_now: int) -> bool:
+    """llm-cards 노드 카드가 있고, 요약 당시 문서 수(payload.basis.docs)가 지금과 크게 다르지 않으면 참. basis 가 없는 옛 카드는 낡은 것으로."""
+    mine = next((c for c in cards if c.get("producer") == PRODUCER), None)
+    if not mine:
+        return False
+    basis = ((mine.get("payload") or {}).get("basis") or {}).get("docs")
+    if basis is None:
+        return False
+    return abs(int(docs_now or 0) - int(basis)) <= max(STALE_ABS, STALE_REL * int(basis))
+
+
 class CardEnricher:
     def __init__(self, cb: CloudBTL, llm: Ollama, log: Callable[[dict[str, Any]], None] | None = None):
         self.cb = cb
@@ -169,14 +184,15 @@ class CardEnricher:
                     break
                 offset = hop["nextOffset"]
             node = (first or {}).get("at") or {}
+            docs_total = ((first or {}).get("card") or {}).get("docCountTotal", 0)
             if has is None:  # 루트는 홉 응답에 자기 카드가 없다 — 직접 묻는다
-                has = any(c.get("producer") == PRODUCER for c in self._node_cards(node["id"]))
+                has = _fresh(self._node_cards(node["id"]), docs_total)
             nodes.append({"id": node["id"], "label": node.get("label"), "path": node.get("path"), "depth": node.get("depth", 0),
                           "card": (first or {}).get("card") or {}, "children": [c["label"] for c in children], "has": has,
-                          "docs_total": ((first or {}).get("card") or {}).get("docCountTotal", 0)})
+                          "docs_total": docs_total})
             for c in children:
-                # 자식의 카드는 홉 응답에 실려 있다 — 자식 홉에서 다시 물을 필요가 없다.
-                visit(c["id"], any(cc.get("producer") == PRODUCER for cc in c.get("cards") or []))
+                # 자식의 카드는 홉 응답에 실려 있다 — 자식 홉에서 다시 물을 필요가 없다. 요약 당시 문서 수(basis)와 지금이 많이 다르면 낡은 것으로 본다.
+                visit(c["id"], _fresh(c.get("cards") or [], (c.get("node") or {}).get("docCountTotal", 0)))
 
         visit("root", None)
         nodes.sort(key=lambda n: -int(n["depth"] or 0))
@@ -200,6 +216,7 @@ class CardEnricher:
         out = self.llm.json(SYSTEM, _node_prompt(node, node.get("card") or {}, node.get("children") or [], lines), NODE_SCHEMA)
         payload = {k: out.get(k) for k in ("summary", "topics", "entities", "period")}
         payload["model"] = self.llm.model
+        payload["basis"] = {"docs": node.get("docs_total"), "children": len(node.get("children") or [])}  # 요약이 본 시점 — 낡음 판정 기준
         self.cb.put_descriptors({"nodeId": node["id"]}, PRODUCER, self.version, [{"kind": "card.node", "page": 0, "payload": payload}])
         rec = {"target": "node", "id": node["id"], "path": node.get("path"), "ms": round((time.perf_counter() - t0) * 1000), "summary": payload["summary"]}
         self.log(rec)

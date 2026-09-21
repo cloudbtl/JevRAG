@@ -171,7 +171,11 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
                                                  "options": [{"kind": "node", "id": "node_lm", "label": "LM", "node": {}, "cards": [{"producer": "cloudbtl-baseline", "payload": {}}]}], "totals": {}, "nextOffset": None})
             if at == "node_lm":
                 return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_lm", "label": "LM", "path": "LM", "depth": 1}, "card": {"docCountTotal": 1, "byType": {"xlsx": 1}},
-                                                 "options": [{"kind": "node", "id": "node_done", "label": "done", "node": {}, "cards": [{"producer": PRODUCER, "payload": {"summary": "already"}}]}], "totals": {}, "nextOffset": None})
+                                                 "options": [{"kind": "node", "id": "node_done", "label": "done", "node": {"docCountTotal": 1}, "cards": [{"producer": PRODUCER, "payload": {"summary": "already", "basis": {"docs": 1}}}]},
+                                                             # 요약 당시 2개였는데 지금 40개 — 낡은 카드라 다시 쓴다
+                                                             {"kind": "node", "id": "node_stale", "label": "stale", "node": {"docCountTotal": 40}, "cards": [{"producer": PRODUCER, "payload": {"summary": "old", "basis": {"docs": 2}}}]}], "totals": {}, "nextOffset": None})
+            if at == "node_stale":
+                return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_stale", "label": "stale", "path": "LM/stale", "depth": 2}, "card": {"docCountTotal": 40}, "options": [], "totals": {}, "nextOffset": None})
             return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_done", "label": "done", "path": "LM/done", "depth": 2}, "card": {"docCountTotal": 1}, "options": [], "totals": {}, "nextOffset": None})
         if p == "/api/nodes/node_root/descriptors" and request.method == "GET":
             return httpx.Response(200, json={"ok": True, "descriptors": []})
@@ -199,10 +203,12 @@ def test_enrich_cards_writes_doc_and_node_cards_bottom_up():
     kind, body = puts[0]
     assert kind == "doc" and body["producer"] == PRODUCER and body["producerVersion"] == "qwen-test-1b"
     assert body["items"][0]["kind"] == "card.doc" and body["items"][0]["payload"]["docType"] == "렌트롤" and body["items"][0]["payload"]["model"] == "qwen-test:1b"
-    # 노드: 깊은 것부터, 이미 llm 카드가 있는 노드(node_done)는 건너뛰고 LM·root 를 쓴다
+    # 노드: 깊은 것부터. 이미 llm 카드가 있고 문서 수가 그대로인 노드(node_done)는 건너뛰고, 문서 수가 크게 늘어난 노드(node_stale)는 다시 쓴다
     node_puts = [k for k, _ in puts if k.startswith("node:")]
-    assert node_puts == ["node:node_lm", "node:node_root"]
-    assert st.nodes == 2
+    assert node_puts == ["node:node_stale", "node:node_lm", "node:node_root"]
+    assert st.nodes == 3
+    stale_payload = next(b for k, b in puts if k == "node:node_stale")["items"][0]["payload"]
+    assert stale_payload["basis"] == {"docs": 40, "children": 0}   # 다음 밤의 낡음 판정 기준
     node_prompt = prompts[1]["messages"][1]["content"]
     assert "Rent Roll — SEI타워 렌트롤" in node_prompt   # 노드 요약은 안의 문서 카드를 본다
     assert all(r.get("summary") or r.get("error") for r in logs)
