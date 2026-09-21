@@ -37,11 +37,15 @@ class Gather:
     status: str                     # complete | budget | empty
     pruned_folders: int = 0         # folders seen but not entered
     below: int = 0                  # documents seen under MAYBE_MIN
+    profile: Any | None = None      # which fields the cards carried
 
 
 def gather(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str = "folders", start: str = "root",
-           fan_out: int = 20, beam: int = 5, max_calls: int = 40, max_depth: int = 8) -> Gather:
+           fan_out: int = 20, beam: int = 5, max_calls: int = 40, max_depth: int = 8, profile: Any | None = None, auto_fields: bool = False) -> Gather:
     jev = jev or Jev()
+    if profile is None and auto_fields:
+        from .profile import choose_profile
+        profile = choose_profile(question, jev, getattr(cb, "field_coverage", lambda: None)())
     frontier: list[tuple[str, list[str], float]] = [(start, [], 3.0)]     # (node id, labels, entry score) — best entry first
     seen: set[str] = set()
     docs: list[Found] = []
@@ -65,7 +69,7 @@ def gather(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: st
         while True:                                       # page through this node: folders first, then documents, fan_out per call
             res = cb.options(tree=tree, at=at, limit=fan_out, offset=offset)
             node = res.get("at") or {}
-            cards = hop_cards(res.get("options") or [])
+            cards = hop_cards(res.get("options") or [], profile)
             if not cards:
                 break
             if calls >= max_calls:
@@ -107,5 +111,5 @@ def gather(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: st
     maybe.sort(key=lambda f: (-f.score, -f.confidence))
     if not docs and not maybe and status == "complete":
         status = "empty"
-    return Gather(question, docs, maybe, folders, hops, calls, status, pruned, below)
+    return Gather(question, docs, maybe, folders, hops, calls, status, pruned, below, profile)
 

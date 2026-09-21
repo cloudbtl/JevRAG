@@ -40,10 +40,12 @@ def main(argv=None) -> int:
     w = sub.add_parser("walk", help="walk a CloudBTL tree hop by hop until a document (or page) is chosen")
     w.add_argument("question"); w.add_argument("--tree", default="folders"); w.add_argument("--start", default="root")
     w.add_argument("--max-hops", type=int, default=6); w.add_argument("--fan-out", type=int, default=20); w.add_argument("--pages", action="store_true")
+    w.add_argument("--fields", default="default", help="auto = the model picks which card fields to see for this question; default = the fixed fold; or a,b,c")
     g = sub.add_parser("gather", help="every document relevant to a question — follow every folder that clears the bar, keep every document that does")
     g.add_argument("question"); g.add_argument("--tree", default="folders"); g.add_argument("--start", default="root")
     g.add_argument("--fan-out", type=int, default=20); g.add_argument("--beam", type=int, default=5, help="folders entered per node at most")
     g.add_argument("--max-calls", type=int, default=40, help="model calls (about a second each) to spend"); g.add_argument("--json", action="store_true")
+    g.add_argument("--fields", default="default", help="auto = the model picks which card fields to see for this question; default = the fixed fold; or a,b,c")
     e = sub.add_parser("enrich-cards", help="write llm-cards card.doc/card.node summaries with a local Ollama model")
     e.add_argument("--limit", type=int, default=300); e.add_argument("--model", default=None); e.add_argument("--refresh", action="store_true")
     e.add_argument("--max-minutes", type=float, default=300); e.add_argument("--no-nodes", action="store_true"); e.add_argument("--log", default=None)
@@ -84,20 +86,28 @@ def main(argv=None) -> int:
                           "top": ans.decision.ranked[:5], "evidence": ans.evidence}, ensure_ascii=False, indent=2)); return 0
     if ns.cmd == "walk":
         from .walk import walk
-        res = walk(ns.question, source(), tree=ns.tree, start=ns.start, max_hops=ns.max_hops, fan_out=ns.fan_out, into_pages=ns.pages)
+        from .profile import parse_fields
+        res = walk(ns.question, source(), tree=ns.tree, start=ns.start, max_hops=ns.max_hops, fan_out=ns.fan_out, into_pages=ns.pages,
+                   profile=parse_fields(ns.fields), auto_fields=(ns.fields == "auto"))
         print(json.dumps({"status": res.status, "path": res.path, "target": (res.target.for_model() | {"id": res.target.id}) if res.target else None,
+                          "profile": res.profile.for_log() if res.profile is not None else None,
                           "hops": [{"at": h.at.get("label"), "source": h.source, "top": h.ranked[:3], "jev_ms": h.jev.elapsed_ms if h.jev else None} for h in res.hops]},
                          ensure_ascii=False, indent=2)); return 0
     if ns.cmd == "gather":
         from .gather import gather
-        g_ = gather(ns.question, source(), tree=ns.tree, start=ns.start, fan_out=ns.fan_out, beam=ns.beam, max_calls=ns.max_calls)
+        from .profile import parse_fields
+        g_ = gather(ns.question, source(), tree=ns.tree, start=ns.start, fan_out=ns.fan_out, beam=ns.beam, max_calls=ns.max_calls,
+                    profile=parse_fields(ns.fields), auto_fields=(ns.fields == "auto"))
         def row(f):
             return {"id": f.card.id, "label": f.card.label, "score": round(f.score, 2), "confidence": round(f.confidence, 2), "path": "/".join(f.path), "facts": f.card.facts}
-        out = {"status": g_.status, "calls": g_.calls, "documents": [row(f) for f in g_.documents], "maybe": [row(f) for f in g_.maybe],
+        out = {"status": g_.status, "calls": g_.calls, "profile": g_.profile.for_log() if g_.profile is not None else None,
+               "documents": [row(f) for f in g_.documents], "maybe": [row(f) for f in g_.maybe],
                "folders": [{"path": "/".join(p), "score": round(s_, 2)} for p, s_ in g_.folders], "pruned_folders": g_.pruned_folders, "below": g_.below}
         if ns.json:
             print(json.dumps(out, ensure_ascii=False, indent=2)); return 0
         print(f"{g_.status} · {g_.calls} calls · {len(g_.documents)} documents, {len(g_.maybe)} maybe · folders entered {len(g_.folders)}, pruned {g_.pruned_folders}")
+        if g_.profile is not None:
+            print(f"  fields ({g_.profile.source}): {', '.join(sorted(g_.profile.fields))}")
         for f in g_.documents:
             print(f"  {f.score:4.2f}  {'/'.join(f.path)}/{f.card.label}")
         if g_.maybe:

@@ -65,6 +65,25 @@ class CloudBTL:
             if not cursor:
                 return out
 
+    def field_coverage(self) -> dict[str, float]:
+        """Share of documents carrying each card field, from GET /documents/stats (descriptor kinds × producers)."""
+        r = self._c.get("/api/documents/stats"); r.raise_for_status()
+        st = r.json()
+        total = max(1, int(st.get("total") or 1))
+        docs_by = {}
+        for d in st.get("descriptors") or []:
+            key = (d.get("kind"), "baseline" if str(d.get("producer", "")).endswith("-baseline") else "enricher")
+            docs_by[key] = max(docs_by.get(key, 0), int(d.get("docs") or 0))
+        enriched = docs_by.get(("card.doc", "enricher"), 0) / total
+        extracted = docs_by.get(("doc.meta", "baseline"), 0) / total        # text extraction ran → pages, sheets, headline
+        by_type = {k: int(v.get("docs") or 0) for k, v in (st.get("byType") or {}).items()}
+        return {
+            "summary": min(1.0, max(enriched, extracted)), "docType": enriched, "period": enriched, "entities": enriched, "topics": enriched,
+            "type": 1.0, "pages": extracted, "sheets": by_type.get("xlsx", 0) / total, "recent": 1.0, "meta": 1.0, "path": 1.0,
+            "project": docs_by.get(("context.project", "enricher"), 0) / total,
+            "inside": 1.0, "types": 1.0, "docs": 1.0, "landed": 1.0,
+        }
+
     def trees(self) -> list[dict[str, Any]]:
         r = self._c.get("/api/trees"); r.raise_for_status()
         return r.json().get("trees", [])

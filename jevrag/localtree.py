@@ -324,6 +324,23 @@ class LocalTree:
                 return out
             p = p.parent
 
+    def field_coverage(self) -> dict[str, float]:
+        """Share of documents that carry each card field here (profile.py shows this to the model). Names and formats are
+        always there; summaries only for text files (first line) or where a local enricher wrote cards; entities/topics/project
+        only from enricher cards."""
+        st = self._ensure_stats().get("", _DirStats())
+        total = max(1, st.docs_total)
+        by = st.by_type
+        text_like = by.get("md", 0)
+        enriched = sum(1 for t in self._cards_index() if t.startswith("doc:"))
+        paged = by.get("pdf", 0) + by.get("pptx", 0) + by.get("xlsx", 0)
+        return {
+            "summary": min(1.0, (text_like + enriched) / total), "docType": enriched / total, "period": enriched / total,
+            "entities": enriched / total, "topics": enriched / total, "type": 1.0, "pages": paged / total,
+            "sheets": by.get("xlsx", 0) / total, "recent": 1.0, "meta": 1.0, "path": 1.0, "project": 0.0,
+            "inside": 1.0, "types": 1.0, "docs": 1.0, "landed": 1.0,
+        }
+
     # ── CloudBTL-shaped reads the filer and the CLI use ──
     def trees(self) -> list[dict[str, Any]]:
         return [{"key": "folders", "id": "local:" + str(self.root), "label": self.root.name}]

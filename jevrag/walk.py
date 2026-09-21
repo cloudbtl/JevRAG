@@ -85,7 +85,10 @@ def _recent(iso: str | None, days: int = 90) -> bool:
     return datetime.now(timezone.utc) - t < timedelta(days=days)
 
 
-def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
+def hop_cards(options: list[dict[str, Any]], profile: Any | None = None) -> list[HopCard]:
+    """Fold each option's descriptors into one card. With a Profile (see profile.py) only the fields the model asked for
+    are shown; without one, everything below (today's fixed fold)."""
+    want = profile.fields if profile is not None else None
     out: list[HopCard] = []
     for o in options:
         base, enr = _cards(o)
@@ -118,6 +121,15 @@ def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
                 facts["sheets"] = "; ".join(str(x) for x in base["pageLabels"][:6])
             if isinstance(base.get("metadata"), dict) and base["metadata"]:
                 facts["meta"] = " ".join(f"{k}={v}" for k, v in list(base["metadata"].items())[:4] if not str(k).startswith("_"))
+            if want is not None:                              # fields only a profile asks for — too long for the default fold
+                if "entities" in want and enr.get("entities"):
+                    facts["entities"] = ", ".join(str(x) for x in enr["entities"][:5])
+                if "topics" in want and enr.get("topics"):
+                    facts["topics"] = ", ".join(str(x) for x in enr["topics"][:6])
+                if "path" in want and d.get("sourceRef"):
+                    facts["path"] = str(d["sourceRef"]).rsplit("/", 1)[0][-80:]
+                if "project" in want and enr.get("project"):
+                    facts["project"] = enr["project"]
             if not summary:
                 summary = str(base.get("headline") or base.get("snippet") or "")
         else:  # page
@@ -126,6 +138,10 @@ def hop_cards(options: list[dict[str, Any]]) -> list[HopCard]:
                 facts["label"] = base["label"]
             if not summary:
                 summary = str(base.get("headline") or base.get("snippet") or "")
+        if want is not None and o["kind"] != "page":
+            facts = {k: v for k, v in facts.items() if k in want or k == "depth"}
+            if "summary" not in want:
+                summary = ""
         hidden = {k: v for k, v in ((base.get("metadata") or {}).items() if isinstance(base.get("metadata"), dict) else ()) if k in ("noFiling", "repo", "kind")}
         if o["kind"] == "node" and (enr.get("summary") or (isinstance(base.get("metadata"), dict) and base["metadata"].get("description"))):
             hidden["described"] = True                       # a written or model summary, not just sample titles
@@ -184,6 +200,7 @@ class Walk:
     status: str            # document | page | stopped | folder | leaf | insufficient_options | max_hops | empty
     hops: list[Hop]
     target: HopCard | None
+    profile: Any | None = None   # which fields the cards carried (profile.py)
 
     @property
     def path(self) -> list[str]:
@@ -191,22 +208,28 @@ class Walk:
 
 
 def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str = "folders", start: str = "root",
-         max_hops: int = 8, fan_out: int = 20, into_pages: bool = False) -> Walk:
+         max_hops: int = 8, fan_out: int = 20, into_pages: bool = False, profile: Any | None = None, auto_fields: bool = False) -> Walk:
     jev = jev or Jev()
+    if profile is None and auto_fields:
+        from .profile import choose_profile
+        profile = choose_profile(question, jev, getattr(cb, "field_coverage", lambda: None)())
     stack: list[str] = [start]          # where we are, with the way back
     exhausted: set[str] = set()         # branches we backed out of — never re-enter
     group_filter: list[str] | None = None
     hops: list[Hop] = []
     best_folder: tuple[float, HopCard] | None = None   # deepest folder whose contents matched the topic — the answer when no document stands out
 
+    def W(status: str, target: HopCard | None) -> Walk:
+        return Walk(question, status, hops, target, profile)
+
     def give_up(status: str) -> Walk:
         if best_folder is not None:
-            return Walk(question, "folder", hops, best_folder[1])
-        return Walk(question, status, hops, None)
+            return W("folder", best_folder[1])
+        return W(status, None)
     for _ in range(max_hops):
         at = stack[-1]
         res = cb.options(tree=tree, at=at, limit=fan_out)
-        cards = [c for c in hop_cards(res.get("options") or []) if c.id not in exhausted]
+        cards = [c for c in hop_cards(res.get("options") or [], profile) if c.id not in exhausted]
         if group_filter is not None:
             cards = [c for c in cards if c.kind != "document" or c.id in group_filter]
             group_filter = None
@@ -243,16 +266,16 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         if ch.kind == "up":
             exhausted.add(at); stack.pop(); continue
         if ch.kind == "stop":
-            return Walk(question, "stopped", hops, HopCard(at, "node", str((res.get("at") or {}).get("label") or at), "", {}))
+            return W("stopped", HopCard(at, "node", str((res.get("at") or {}).get("label") or at), "", {}))
         if ch.kind == "group":
             group_filter = ch.members; continue                # same node, next hop shows only that type
         if ch.kind == "page":
-            return Walk(question, "page", hops, ch)
+            return W("page", ch)
         if ch.kind == "document" and not into_pages:
-            return Walk(question, "document", hops, ch)
+            return W("document", ch)
         stack.append(ch.id)
     if hops and hops[-1].chosen and hops[-1].chosen.kind in ("node", "document"):
-        return Walk(question, "max_hops", hops, hops[-1].chosen)
+        return W("max_hops", hops[-1].chosen)
     return give_up("max_hops")
 
 
