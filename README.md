@@ -101,6 +101,17 @@ jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 프로젝트 관
 #   maybe: 1.48 estimate/db_quote_line_items · 1.26 KMI-제안-샘플/03_견적/견적_메모 · …
 ```
 
+### Let Jev choose the card fields
+
+Cards can become noisy when every descriptor is unfolded at every hop. `--fields auto` first gives Jev the available field families and their coverage, then uses its selected profile for the walk or gather. Labels, document type, summary and document counts remain a fixed base so the field-selection step cannot hide the only useful branch.
+
+```bash
+jevrag --local ~/Desktop/Desktopped gather "견적서 자동화 관련 문서" --fields auto
+jevrag walk "2026년 3월 렌트롤" --tree folders --fields docType,period,entities
+```
+
+The selected profile is written to the decision log. Treat this as part of retrieval, not as proof of quality: compare it against a fixed answer bundle in `eval/` before making `auto` the default.
+
 ## Nightly card enricher (local LLM)
 
 Baseline cards are deterministic headers. `jevrag enrich-cards` adds the one-line *content* summary a
@@ -245,9 +256,7 @@ as an accuracy gain.
 
 ## Status
 
-Reference implementation, v0.2. The CloudBTL side (landing, descriptors, webhooks, ledger) is live;
-`fields.*` and `faq.*` producers are being built as external enrichers. The heuristic chooser exists
-so the loop runs end to end without a TypeSafe key; it is not a substitute for Jev.
+Reference implementation, v0.2. Local walk, gather, filing, watch, card enrichment and automatic field profiling run end to end; the same engine can use a desktop directory or CloudBTL trees. The CloudBTL side (landing, descriptors, cards, trees and placement ledger) is live. `fields.*`, `faq.*` and entity-connection producers remain external enrichers under development. The heuristic chooser keeps the loop runnable without a TypeSafe key; it is not a substitute for Jev.
 
 ## 한국어 요약
 
