@@ -10,7 +10,10 @@ set -euo pipefail
 : "${DRIVE_IDS:=}"          # 콤마 구분. 비우면 전부.
 : "${INCLUDE_SHARED_WITH_ME:=1}"
 : "${LAND_RUN_BASELINE:=0}"   # 0 = 추출은 큐에 넣고 drain 이 처리(대량 이관), 1 = 인라인
+: "${LINKED:=1}"              # 1 = 연결 모드(바이트는 추출 뒤 폐기, 원본은 Drive), 0 = 복사
 EXTRA=""; [ "$LAND_RUN_BASELINE" = "0" ] && EXTRA="--no-baseline"
+[ "$LINKED" = "1" ] && EXTRA="$EXTRA --linked"
+EXTRA="$EXTRA --link-template https://drive.google.com/file/d/{id}/view"
 mkdir -p ~/.config/rclone
 printf '%s\n' '[gdrive]' 'type = drive' 'env_auth = true' 'scope = drive.readonly' 'export_formats = docx,xlsx,pptx' > ~/.config/rclone/rclone.conf
 drives_json="$(rclone backend drives gdrive: 2>/dev/null || echo '[]')"

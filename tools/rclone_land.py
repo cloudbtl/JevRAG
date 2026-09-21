@@ -64,7 +64,7 @@ def fetch_group(remote: str, paths: list[str], tmp: Path) -> dict[str, bytes]:
     return out
 
 
-def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix: str, source: str, metadata: dict, batch: str, data: bytes | None = None, no_baseline: bool = False) -> dict:
+def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix: str, source: str, metadata: dict, batch: str, data: bytes | None = None, no_baseline: bool = False, linked: bool = False, link_template: str | None = None) -> dict:
     """init -> rclone copy to tmp -> PUT to the session URL (no API/proxy in the byte path) -> commit."""
     if data is None:
         blobs = fetch_group(remote, [f["Path"]], tmp)
@@ -78,12 +78,29 @@ def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix
         r = up.put(ticket["uploadUrl"], content=data, headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(data))})
         if r.status_code not in (200, 201):
             raise RuntimeError(f"put_failed http_{r.status_code}")
-    commit = client.post("/api/documents/land/commit", json={
-        "uploadId": ticket["uploadId"], "source": source, "sourceRef": (prefix + "/" if prefix else "") + f["Path"],
-        "metadata": metadata, "ingestBatch": batch, "linkMode": "none", "dedupe": True, "runBaseline": not no_baseline,
-    })
+    ex = file_extras(f, prefix, link_template)
+    body = {
+        "uploadId": ticket["uploadId"], "source": source, "sourceRef": ex["ref"],
+        "metadata": {**metadata, **({"sourceFileId": ex["id"]} if ex["id"] else {})}, "ingestBatch": batch, "linkMode": "none", "dedupe": True, "runBaseline": not no_baseline,
+    }
+    if ex["uri"]:
+        body["externalUri"] = ex["uri"]
+    if linked:
+        body["storage"] = "linked"
+    commit = client.post("/api/documents/land/commit", json=body)
     commit.raise_for_status()
     return commit.json()
+
+
+def file_extras(f: dict, prefix: str, link_template: str | None) -> dict:
+    """Per-file identity for the landing: sourceRef (prefix/path), externalUri from the template, and the source's own id."""
+    from urllib.parse import quote
+    ref = (prefix + "/" if prefix else "") + f["Path"]
+    fid = str(f.get("ID") or "")
+    uri = None
+    if link_template:
+        uri = link_template.replace("{id}", quote(fid, safe="")).replace("{path}", quote(ref, safe="/"))
+    return {"ref": ref, "id": fid, "uri": uri}
 
 
 def key_of(f: dict) -> str:
@@ -103,6 +120,8 @@ def main() -> int:
     ap.add_argument("--max-minutes", type=float, default=600)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-baseline", action="store_true", help="queue text extraction instead of running it inline (bulk mode; drain later)")
+    ap.add_argument("--linked", action="store_true", help="storage=linked: keep hash/descriptors/cards, discard bytes after extraction; original stays at the source")
+    ap.add_argument("--link-template", default=None, help="externalUri template with {id} and {path}, e.g. https://drive.google.com/file/d/{id}/view")
     ns = ap.parse_args()
 
     base = os.environ["CLOUDBTL_API_BASE"].rstrip("/")
@@ -197,6 +216,13 @@ def main() -> int:
             save(); continue
         form = {"source": ns.source, "sourceRefs": json.dumps(refs, ensure_ascii=False), "metadata": json.dumps(metadata, ensure_ascii=False),
                 "ingestBatch": batch, "linkMode": "none", "dedupe": "true", "runBaseline": "false" if ns.no_baseline else "true"}
+        # 파일별 정체: 원본 링크(externalUris)와 원천 파일 id(metadataPerFile.sourceFileId) — 옮겨도·수정돼도 같은 파일임을 잡는 열쇠.
+        exs = [file_extras(f, prefix, ns.link_template) for f in group if key_of(f) in keys]
+        if ns.link_template:
+            form["externalUris"] = json.dumps([e["uri"] for e in exs], ensure_ascii=False)
+        form["metadataPerFile"] = json.dumps([({"sourceFileId": e["id"]} if e["id"] else {}) for e in exs], ensure_ascii=False)
+        if ns.linked:
+            form["storage"] = "linked"
         t0 = time.time()
         try:
             r = client.post("/api/documents/land", data=form, files=parts)
@@ -221,7 +247,7 @@ def main() -> int:
         f = big[j]; j += 1
         t0 = time.time()
         try:
-            res = direct_land(client, ns.remote, f, state_path.parent / ("." + state_path.stem + ".tmp"), prefix=prefix, source=ns.source, metadata=metadata, batch=batch, no_baseline=ns.no_baseline)
+            res = direct_land(client, ns.remote, f, state_path.parent / ("." + state_path.stem + ".tmp"), prefix=prefix, source=ns.source, metadata=metadata, batch=batch, no_baseline=ns.no_baseline, linked=ns.linked, link_template=ns.link_template)
             st = "deduplicated" if res.get("deduplicated") else "landed"
             state[key_of(f)] = {"status": st, "id": (res.get("proposal") or {}).get("id"), "baseline": (res.get("baseline") or {}).get("status"), "direct": True}
             landed += st == "landed"; dedup += st == "deduplicated"
@@ -244,11 +270,17 @@ def main() -> int:
                 state[key_of(f)] = {"status": "empty"}; save(); continue
             ref = (prefix + "/" if prefix else "") + f["Path"]
             if len(data) > REQUEST_BYTE_CAP:
-                res = direct_land(client, ns.remote, f, tmpdir, prefix=prefix, source=ns.source, metadata=metadata, batch=batch, data=data, no_baseline=ns.no_baseline)
+                res = direct_land(client, ns.remote, f, tmpdir, prefix=prefix, source=ns.source, metadata=metadata, batch=batch, data=data, no_baseline=ns.no_baseline, linked=ns.linked, link_template=ns.link_template)
                 item = res
             else:
-                form = {"source": ns.source, "sourceRefs": json.dumps([ref], ensure_ascii=False), "metadata": json.dumps(metadata, ensure_ascii=False),
+                ex = file_extras(f, prefix, ns.link_template)
+                form = {"source": ns.source, "sourceRefs": json.dumps([ref], ensure_ascii=False),
+                        "metadata": json.dumps({**metadata, **({"sourceFileId": ex["id"]} if ex["id"] else {})}, ensure_ascii=False),
                         "ingestBatch": batch, "linkMode": "none", "dedupe": "true", "runBaseline": "false" if ns.no_baseline else "true"}
+                if ex["uri"]:
+                    form["externalUri"] = ex["uri"]
+                if ns.linked:
+                    form["storage"] = "linked"
                 r = client.post("/api/documents/land", data=form, files=[("files", (f["Name"], data, "application/octet-stream"))])
                 r.raise_for_status()
                 item = (r.json().get("results") or [{}])[0]
