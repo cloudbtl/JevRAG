@@ -2,7 +2,8 @@
 
 `memory`: 도메인 → 주제 two levels, from the company's own vocabulary axes. Layers (명세/지식/치팅시트/다이제스트)
 are badges (metadata.layer), not folders. `전사` holds company-wide items that domain folders inherit.
-`filed`: root only — grows by filing.
+`filed`: the same domain folders at level 1 (metadata.kind=domain), nothing below — grows by filing. Filing never
+leaves a document in the root or in an empty domain folder; it makes the first subfolder instead.
 """
 from __future__ import annotations
 
@@ -24,3 +25,7 @@ def memory_nodes() -> list[dict]:
         for t in topics:
             nodes.append({"path": f"{domain}/{t}", "label": t, "metadata": {"seeded": True, "kind": "topic", "inherits": f"전사/{t}" if domain != "전사" and t in MEMORY_SKELETON["전사"] else None}})
     return nodes
+
+
+def filed_nodes() -> list[dict]:
+    return [{"path": d, "label": d, "metadata": {"seeded": True, "kind": "domain"}} for d in MEMORY_SKELETON]

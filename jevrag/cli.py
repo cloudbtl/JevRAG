@@ -57,11 +57,11 @@ def main(argv=None) -> int:
         st = enr.run(limit=ns.limit, refresh=ns.refresh, max_minutes=ns.max_minutes, nodes=not ns.no_nodes)
         print(json.dumps({"documents": st.documents, "nodes": st.nodes, "failed": st.failed, "ms": st.ms}, ensure_ascii=False)); return 0
     if ns.cmd == "seed-trees":
-        from .skeleton import memory_nodes
+        from .skeleton import memory_nodes, filed_nodes
         cb = CloudBTL()
         m = cb.ensure_tree("memory", "Memory", "jevrag", "0.2"); r = cb.upsert_nodes("memory", memory_nodes(), [], placed_by="seed")
-        f_ = cb.ensure_tree("filed", "Filed", "jevrag", "0.2")
-        print(json.dumps({"memory": m.get("id"), "memory_nodes": r.get("nodes"), "filed": f_.get("id")}, ensure_ascii=False)); return 0
+        f_ = cb.ensure_tree("filed", "Filed", "jevrag", "0.2"); rf = cb.upsert_nodes("filed", filed_nodes(), [], placed_by="seed")
+        print(json.dumps({"memory": m.get("id"), "memory_nodes": r.get("nodes"), "filed": f_.get("id"), "filed_nodes": rf.get("nodes")}, ensure_ascii=False)); return 0
     if ns.cmd == "file":
         from .filing import file_document, file_group, Namer
         from .enrich_cards import Ollama, DEFAULT_MODEL

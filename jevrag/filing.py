@@ -80,19 +80,30 @@ class Namer:
     def __init__(self, llm: Any | None = None):
         self.llm = llm
 
-    def name(self, question: str, siblings: list[str], parent: str) -> str:
+    @staticmethod
+    def fallback(question: str) -> str:
+        for line in question.split("\n"):
+            if line.startswith("유형:") and line[3:].strip():
+                return line[3:].strip()[:40]
+        return "기타"
+
+    def name(self, question: str, siblings: list[str], parent: str, depth: int = 1) -> str:
+        """depth = the new folder's depth. 1~2 = subject folders (건물·프로젝트·브랜드·업무), deeper = document kinds."""
         if self.llm is None:
-            for line in question.split("\n"):
-                if line.startswith("유형:") and line[3:].strip():
-                    return line[3:].strip()[:40]
-            return "기타"
+            return self.fallback(question)
+        level = ("건물·프로젝트·브랜드·업무 단위(예: 더갤러리832, SEI타워, 에버랜드 팝업). 문서 종류로 짓지 않는다." if depth <= 2
+                 else "문서 종류 단위(예: 임대차계약서, 입점의향서, IM, 렌트롤, 견적서). 한 문서가 아니라 같은 부류가 모일 이름.")
         schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
-        out = self.llm.json(
-            "너는 회사 문서 폴더의 이름을 짓는 사서다. 짧고(2~6단어) 형제 폴더와 같은 결의 한국어 이름을 짓는다. JSON 만.",
-            f"상위 폴더: {parent}\n형제 폴더: {', '.join(siblings[:12]) or '(없음)'}\n넣을 문서:\n{question}\n\n이 문서가 들어갈 새 폴더 이름 하나를 JSON 으로: name",
-            schema,
-        )
-        return str(out.get("name") or "기타").strip().replace("/", "·")[:40]
+        try:
+            out = self.llm.json(
+                "너는 회사 문서 폴더의 이름을 짓는 사서다. 짧고(2~6단어) 형제 폴더와 같은 결의 한국어 이름을 짓는다. 날짜·버전·날인 여부는 넣지 않는다. JSON 만.",
+                f"상위 폴더: {parent}\n형제 폴더: {', '.join(siblings[:12]) or '(없음)'}\n이 층의 폴더 이름 기준: {level}\n넣을 문서:\n{question}\n\n이 문서가 들어갈 새 폴더 이름 하나를 JSON 으로: name",
+                schema,
+            )
+            name = str(out.get("name") or "").strip().replace("/", "·")[:40]
+        except Exception:  # noqa: BLE001 — 이름 짓기가 실패해도 배치는 계속된다
+            name = ""
+        return name or self.fallback(question)
 
 
 def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, tree: str = "filed", start: str = "root",
@@ -112,6 +123,13 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
         path = node.get("path") or ""
         node_id = node.get("id")
         folders = [c for c in hop_cards(res.get("options") or []) if c.kind == "node"]
+        node_meta = ((res.get("card") or {}).get("metadata") or {}) if isinstance((res.get("card") or {}).get("metadata"), dict) else {}
+        if not folders and (not path or node_meta.get("kind") == "domain"):
+            # 빈 루트·빈 도메인 폴더: 사람도 여기엔 문서를 바로 두지 않고 첫 폴더를 만든다. 모델에게 '여기/새 폴더' 둘만 묻지 않는다.
+            name = namer.name(question, [], path or "(root)", depth=path.count("/") + 2 if path else 1)
+            new_path = (path + "/" if path else "") + name
+            hops.append({"at": path or "(root)", "candidates": [], "ranked": [], "chosen": NEW, "source": "rule:empty-domain", "jev_ms": None})
+            return _finish(doc, cb, tree, new_path, None, name, hops, "placed_new_folder", t0, dry_run, log, question)
         choices = list(folders)
         if hops or not folders:  # 루트에 바로 두는 건 마지막 수단 — 자식 폴더가 있을 때 루트의 'here' 는 첫 홉에서 빼고 진행
             choices.append(HopCard(HERE, "here", "■ 여기에 둔다", "현재 폴더가 이 문서의 자리 — 형제 문서들과 같은 종류·주제", {"path": path or "(root)", "docs": (res.get("card") or {}).get("docCount")}))
@@ -122,22 +140,24 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
                      "chosen": hop.chosen.id if hop.chosen else None, "source": hop.source, "jev_ms": hop.jev.elapsed_ms if hop.jev else None})
         ch = hop.chosen
         if ch is None:
-            # 아무것도 2점을 못 넘김 → 현재 폴더에 둔다(가장 구체적인 확정 지점). 로그에 undecided 표시.
-            return _finish(doc, cb, tree, path, node_id, None, hops, "undecided", t0, dry_run, log, question)
+            # 아무것도 문턱을 못 넘김. 루트라면 두지 않고 대기열에 남긴다(루트는 쓰레기통이 되기 쉽다); 아래층이면 현재 폴더에 둔다(가장 구체적인 확정 지점).
+            if not path:
+                return _finish(doc, cb, tree, path, node_id, None, hops, "undecided", t0, dry_run, log, question, move=False)
+            return _finish(doc, cb, tree, path, node_id, None, hops, "undecided_here", t0, dry_run, log, question)
         if ch.kind == "here":
             return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
         if ch.kind == "new":
-            name = namer.name(question, [f.label for f in folders], path or "(root)")
+            name = namer.name(question, [f.label for f in folders], path or "(root)", depth=path.count("/") + 2 if path else 1)
             new_path = (path + "/" if path else "") + name
             return _finish(doc, cb, tree, new_path, None, name, hops, "placed_new_folder", t0, dry_run, log, question)
         at = ch.id
     return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
 
 
-def _finish(doc, cb, tree, path, node_id, created, hops, status, t0, dry_run, log, question) -> Placement:
+def _finish(doc, cb, tree, path, node_id, created, hops, status, t0, dry_run, log, question, move: bool = True) -> Placement:
     ms = round((time.perf_counter() - t0) * 1000)
     result = None
-    if not dry_run:
+    if not dry_run and move:
         result = cb.move(tree, doc["id"], None, path, by=PLACED_BY, reason=f"file:{status}")
         node_id = result.get("nodeId", node_id)
     rec = {"event": "file", "proposalId": doc["id"], "title": doc.get("title"), "tree": tree, "path": path, "status": status,
@@ -153,12 +173,14 @@ def file_group(docs: list[dict[str, Any]], cb: CloudBTL, jev: Jev | None = None,
         return []
     first = file_document(docs[0], cb, jev, **kw)
     out = [first]
+    decided = first.status != "undecided"   # 리더가 루트에서 미결이면 형제도 대기열에 남긴다
     for d in docs[1:]:
-        if not kw.get("dry_run"):
+        status = "placed_with_group" if decided else "undecided_with_group"
+        if decided and not kw.get("dry_run"):
             cb.move(first.tree, d["id"], None, first.path, by=PLACED_BY, reason="file:group")
-        rec = {"event": "file", "proposalId": d["id"], "title": d.get("title"), "tree": first.tree, "path": first.path, "status": "placed_with_group",
+        rec = {"event": "file", "proposalId": d["id"], "title": d.get("title"), "tree": first.tree, "path": first.path if decided else "", "status": status,
                "leader": first.proposal_id, "hops": [], "ms": 0, "dry_run": bool(kw.get("dry_run"))}
         if kw.get("log"):
             kw["log"](rec)
-        out.append(Placement(d["id"], first.tree, first.path, first.node_id, None, [], "placed_with_group", 0, rec))
+        out.append(Placement(d["id"], first.tree, first.path if decided else "", first.node_id if decided else None, None, [], status, 0, rec))
     return out

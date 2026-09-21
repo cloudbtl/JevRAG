@@ -306,7 +306,33 @@ def test_filing_without_a_model_stays_undecided_at_the_root_and_says_so():
     moves = []
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(lambda r: _filing_tree_handler(moves, r)))
     pl = file_document({"id": "prop_c", "title": "무관한 문서", "documentType": "pdf"}, cb, Jev(api_key=""))
-    assert pl.status == "undecided" and pl.path == "" and moves[-1]["reason"] == "file:undecided"
+    # 루트에서 미결이면 두지 않는다 — 대기열(notInTree)에 남고 다음 밤에 다시 본다
+    assert pl.status == "undecided" and pl.path == "" and moves == []
+
+
+def test_filing_makes_the_first_subfolder_in_an_empty_domain_and_siblings_follow_only_a_decided_leader():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_document, file_group, Namer
+    moves = []
+    def handler(request: httpx.Request):
+        if request.url.path == "/api/options" and request.url.params.get("at") == "root":
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {"docCount": 0},
+                                             "options": [{"kind": "node", "id": "node_re", "label": "부동산본부", "weight": 0, "node": {"path": "부동산본부", "depth": 1, "docCount": 0, "docCountTotal": 0, "children": 0},
+                                                          "cards": [{"producer": "cloudbtl-baseline", "payload": {"docCountTotal": 0, "metadata": {"kind": "domain"}}}, {"producer": "llm-cards", "payload": {"summary": "임대차·렌트롤·건물 자료"}}]}], "totals": {}, "nextOffset": None})
+        if request.url.path == "/api/options" and request.url.params.get("at") == "node_re":
+            # 빈 도메인 폴더 — 자식 없음, 카드 메타에 kind=domain
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0, "metadata": {"kind": "domain", "seeded": True}}, "options": [], "totals": {}, "nextOffset": None})
+        return _filing_tree_handler(moves, request)
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
+    doc = {"id": "prop_c", "title": "전대차약정서(일산GLC)", "documentType": "docx", "sourceRef": "[LM]/일산차병원/전대차약정서.docx"}
+    pl = file_document(doc, cb, _lease_jev(), namer=Namer(None))
+    # 부동산본부(빈 도메인)에 들어가면 모델에게 '여기/새 폴더' 를 묻지 않고 첫 폴더를 만든다(이름은 Namer; 모델 없으면 유형)
+    assert pl.status == "placed_new_folder" and pl.path == "부동산본부/계약서" and pl.hops[-1]["source"] == "rule:empty-domain"
+    assert moves[-1]["to"] == "부동산본부/계약서"
+    # 리더가 루트에서 미결이면 형제도 움직이지 않는다
+    moves.clear()
+    out = file_group([{"id": "prop_x", "title": "무관"}, {"id": "prop_y", "title": "무관 2"}], cb, Jev(api_key=""), namer=Namer(None))
+    assert [p.status for p in out] == ["undecided", "undecided_with_group"] and moves == []
 
 
 def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():
