@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jevrag"
+version = "0.1.0"
+description = "Option-ready retrieval for decision models (TypeSafe Jev) on the CloudBTL landing layer"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+jevrag = "jevrag.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jevrag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

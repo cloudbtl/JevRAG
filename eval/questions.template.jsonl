@@ -1,0 +1,5 @@
+{"id":"ex-001","question":"average unit price for on-site staffing in our quotes over the last 3 years","intent":"price","operation":"count","horizon":"multi_year","answer_lives_in":"files","expected":{"action":"count","value_key":"unitPrice","conditions":["vatIncluded"]}}
+{"id":"ex-002","question":"which contracts with landlords expire within 6 months","intent":"contract","operation":"filter","horizon":"now","answer_lives_in":"files","expected":{"action":"filter","fields":["endDate"]}}
+{"id":"ex-003","question":"how do I file a business-income payment request and by when","intent":"rule","operation":"lookup","horizon":"timeless","answer_lives_in":"files","expected":{"action":"lookup","kinds":["faq.doc"]}}
+{"id":"ex-004","question":"popups where visitors exceeded the KPI target, with the promotions run","intent":"case","operation":"filter","horizon":"multi_year","answer_lives_in":"files","expected":{"action":"filter","kinds":["fields.result"]}}
+{"id":"ex-005","question":"last week's revenue vs the same week last year by site","intent":"aggregate","operation":"compare","horizon":"recent","answer_lives_in":"warehouse","expected":{"action":"none"}}
