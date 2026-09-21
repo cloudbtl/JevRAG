@@ -30,6 +30,15 @@ MAX_DIRECT_BYTES = 2 * 1024 * 1024 * 1024
 RCLONE = os.getenv("RCLONE", "rclone")
 
 
+def gcs_object(uri: str) -> str:
+    """Return an on-the-fly rclone GCS remote for a gs:// object.
+
+    ax-apps-storage uses uniform bucket-level access. rclone otherwise tries to
+    write a legacy object ACL and GCS rejects every checkpoint upload.
+    """
+    return ":gcs,env_auth=true,bucket_policy_only=true:" + uri[len("gs://"):]
+
+
 def is_junk(path: str) -> bool:
     parts = path.split("/")
     name = parts[-1]
@@ -130,11 +139,12 @@ def main() -> int:
     prefix = ns.prefix if ns.prefix is not None else ns.remote.split(":", 1)[1].strip("/")
     batch = ns.batch or f"{ns.source}_{time.strftime('%Y%m%d')}"
     gcs_state = ns.state if ns.state.startswith("gs://") else None
+    state_load = None
     if gcs_state:
         # 컨테이너(Cloud Run Job)는 무상태 — 상태 파일을 GCS 에 두고 시작 때 내려받고 저장 때마다 올린다.
         state_path = Path("/tmp/rclone_land_state") / (gcs_state.rsplit("/", 1)[-1] or "state.json")
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([RCLONE, "copyto", ":gcs,env_auth=true:" + gcs_state[len("gs://"):], str(state_path), "-q"], capture_output=True)
+        state_load = subprocess.run([RCLONE, "copyto", gcs_object(gcs_state), str(state_path), "-q"], capture_output=True, text=True)
     else:
         state_path = Path(ns.state)
     state: dict = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -143,12 +153,19 @@ def main() -> int:
     def log(rec: dict) -> None:
         print(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **rec}, ensure_ascii=False), file=logf, flush=True)
 
+    if state_load is not None:
+        log({"event": "state_load", "found": state_path.exists(), "entries": len(state),
+             **({"detail": state_load.stderr[-300:]} if state_load.returncode and state_load.stderr else {})})
+
     def save() -> None:
         tmp = state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False))
         tmp.replace(state_path)
         if gcs_state:
-            subprocess.run([RCLONE, "copyto", str(state_path), ":gcs,env_auth=true:" + gcs_state[len("gs://"):], "-q"], capture_output=True)
+            saved = subprocess.run([RCLONE, "copyto", str(state_path), gcs_object(gcs_state), "-q"], capture_output=True, text=True)
+            if saved.returncode:
+                log({"event": "state_save_failed", "detail": saved.stderr[-500:]})
+                raise RuntimeError(f"checkpoint upload failed: {gcs_state}")
 
     files = listing(ns.remote)
     todo, big, unknown, oversize, junk, done = [], [], [], 0, 0, 0
