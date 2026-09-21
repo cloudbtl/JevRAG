@@ -131,8 +131,11 @@ def test_walk_with_jev_uses_scores_and_masks_state():
         return httpx.Response(200, json={"model": "jev-test", "answers": answers})
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(_tree_handler))
     res = walk("anything", cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)))
-    assert [h.source for h in res.hops] == ["jev"]
-    assert res.path == ["PM"] and res.status == "leaf"  # PM 아래는 비어 있다
+    # PM 은 비어 있다 → 사람처럼 되돌아 나와(exhausted) 루트에서 다시 고른다; 두 번째 홉의 후보에 PM 은 없고 '멈춤'이 있다
+    assert [h.source for h in res.hops] == ["jev", "jev"]
+    assert res.path[0] == "PM" and res.status == "stopped"
+    second = [c.id for c in res.hops[1].cards]
+    assert "node_pm" not in second and "__stop__" in second and "node_lm" in second
     assert seen[0]["state"]["candidates"][0]["kind"] == "node"
 
 
@@ -224,3 +227,125 @@ def test_enrich_cards_survives_a_failing_document():
     llm = Ollama(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"message": {"content": json.dumps({"summary": "s", "docType": "d", "topics": [], "entities": [], "period": "", "language": "en"})}})))
     st = CardEnricher(CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(cb_handler)), llm).run(limit=10)
     assert st.documents == 1 and st.failed == 1
+
+
+def test_walk_groups_many_documents_by_type_then_narrows():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.walk import walk
+    def handler(request: httpx.Request):
+        docs = []
+        for i in range(12):
+            kind = "계약서" if i % 3 == 0 else "견적서"
+            docs.append({"kind": "document", "id": f"prop_{i}", "label": f"{kind} {i}", "weight": 1,
+                         "document": {"documentType": "pdf", "fileSize": 1, "createdAt": "2026-09-21T00:00:00Z", "sourceRef": None},
+                         "cards": [{"producer": "cloudbtl-baseline", "payload": {"headline": kind}}, {"producer": "llm-cards", "payload": {"summary": kind + " 문서", "docType": kind}}]})
+        return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "root", "label": "root"}, "ancestors": [], "card": {}, "options": docs, "totals": {}, "nextOffset": None})
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
+    res = walk("계약서 문서", cb, Jev(api_key=""))
+    # 홉1: 유형 그룹 2개(견적서×8, 계약서×4) 중 계약서 그룹 → 홉2: 계약서 4개 중 하나
+    assert res.hops[0].chosen.kind == "group" and res.hops[0].chosen.label.startswith("계약서")
+    assert [c.kind for c in res.hops[0].cards if c.kind == "group"] == ["group", "group"]
+    assert res.status == "document" and res.target.facts["docType"] == "계약서"
+    assert all(c.facts.get("docType") == "계약서" for c in res.hops[1].cards if c.kind == "document")
+
+
+# ── filing (넣기) ──
+
+def _filing_tree_handler(moves: list, request: httpx.Request):
+    p = request.url.path
+    if p == "/api/options":
+        at = request.url.params.get("at")
+        def node(id_, label, path, docs, summary):
+            return {"kind": "node", "id": id_, "label": label, "weight": docs, "node": {"path": path, "depth": path.count("/") + 1, "docCount": 0, "docCountTotal": docs, "children": 0},
+                    "cards": [{"producer": "cloudbtl-baseline", "payload": {"docCountTotal": docs}}, {"producer": "llm-cards", "payload": {"summary": summary}}]}
+        if at == "root":
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_root", "label": "Filed", "path": ""}, "ancestors": [], "card": {"docCount": 0},
+                                             "options": [node("node_re", "부동산본부", "부동산본부", 40, "임대차·렌트롤·건물 자료"), node("node_pop", "팝업", "팝업", 30, "팝업스토어 프로젝트 자료")], "totals": {}, "nextOffset": None})
+        if at == "node_re":
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_re", "label": "부동산본부", "path": "부동산본부"}, "ancestors": [], "card": {"docCount": 0},
+                                             "options": [node("node_lease", "임대차계약", "부동산본부/임대차계약", 12, "전대차·임대차 계약서와 약정서"), node("node_rr", "렌트롤", "부동산본부/렌트롤", 8, "임차인별 보증금 임대료 표")], "totals": {}, "nextOffset": None})
+        if at == "node_lease":
+            return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": "node_lease", "label": "임대차계약", "path": "부동산본부/임대차계약"}, "ancestors": [], "card": {"docCount": 12}, "options": [], "totals": {}, "nextOffset": None})
+        return httpx.Response(200, json={"ok": True, "at": {"kind": "node", "id": at, "label": at, "path": at}, "ancestors": [], "card": {}, "options": [], "totals": {}, "nextOffset": None})
+    if p.startswith("/api/proposals/") and p.endswith("/descriptors"):
+        return httpx.Response(200, json={"ok": True, "descriptors": [
+            {"kind": "card.doc", "producer": "cloudbtl-baseline", "payload": {"headline": "전 대 차 약 정 서", "snippet": "SECRET body"}},
+            {"kind": "card.doc", "producer": "llm-cards", "payload": {"summary": "이지스자산운용과 더내츄럴키친 사이 일산 GLC 전대차 약정서", "docType": "계약서", "period": "2020-03", "entities": ["이지스자산운용", "샐러드스탑"]}}]})
+    if p.endswith("/move"):
+        moves.append(json.loads(request.content)); return httpx.Response(200, json={"ok": True, "nodeId": "node_x", "path": json.loads(request.content)["to"], "attached": True, "by": "jev", "pinned": False})
+    return httpx.Response(404)
+
+
+def _lease_jev():
+    """Jev 목 — 임대 관련 카드에 3점, '임대차계약' 폴더 안에서는 '여기에 둔다' 에 3점. 배치 역학을 결정적으로 시험한다."""
+    def handler(request: httpx.Request):
+        body = json.loads(request.content); at = body["state"].get("at", ""); cands = body["state"]["candidates"]
+        answers = {}
+        for i, c in enumerate(cands):
+            text = c["label"] + " " + c["summary"]
+            if c["kind"] == "here":
+                sc = 3 if at == "임대차계약" else 0
+            elif c["kind"] == "new":
+                sc = 0
+            else:
+                sc = 3 if any(k in text for k in ("임대", "전대차", "계약")) else 0
+            answers[f"q{i}"] = {"type": "score", "score": sc, "confidence": 0.8}
+        return httpx.Response(200, json={"model": "jev-test", "answers": answers})
+    return Jev(api_key="k", transport=httpx.MockTransport(handler))
+
+
+def test_filing_without_a_model_stays_undecided_at_the_root_and_says_so():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_document
+    moves = []
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(lambda r: _filing_tree_handler(moves, r)))
+    pl = file_document({"id": "prop_c", "title": "무관한 문서", "documentType": "pdf"}, cb, Jev(api_key=""))
+    assert pl.status == "undecided" and pl.path == "" and moves[-1]["reason"] == "file:undecided"
+
+
+def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_document
+    moves, logs = [], []
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(lambda r: _filing_tree_handler(moves, r)))
+    doc = {"id": "prop_c", "title": "전대차약정서(일산GLC)_샐러드스탑", "documentType": "docx", "sourceRef": "[LM]/일산차병원/전대차약정서.docx", "metadata": {"division": "LM", "_seenAt": []}}
+    pl = file_document(doc, cb, _lease_jev(), log=logs.append)
+    # Jev(목): 임대 관련 폴더를 높이 치고, '임대차계약' 폴더에 서면 '여기에 둔다' → 부동산본부 → 임대차계약 → 여기에 둔다
+    assert [h["chosen"] for h in pl.hops][:2] == ["node_re", "node_lease"]
+    assert pl.status == "placed" and pl.path == "부동산본부/임대차계약"
+    assert moves == [{"proposalId": "prop_c", "from": None, "to": "부동산본부/임대차계약", "by": "jev", "reason": "file:placed"}]
+    rec = logs[0]
+    assert rec["event"] == "file" and rec["path"] == "부동산본부/임대차계약" and len(rec["hops"]) == 3
+    assert "SECRET" not in json.dumps(rec) and "_seenAt" not in rec["question"]
+    # 홉 로그에는 본 카드와 점수가 남는다(채점표)
+    assert rec["hops"][0]["candidates"][0]["kind"] == "node" and rec["hops"][0]["ranked"]
+
+
+def test_filing_creates_a_new_folder_when_nothing_fits():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_document, Namer
+    moves = []
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("/descriptors"):
+            return httpx.Response(200, json={"ok": True, "descriptors": [{"kind": "card.doc", "producer": "llm-cards", "payload": {"summary": "양자색역학 강의 노트", "docType": "강의노트"}}]})
+        return _filing_tree_handler(moves, request)
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
+    # Jev: 첫 홉은 아무 폴더도 2점 미달 → 휴리스틱에서는 undecided 가 되므로 여기서는 Jev 목으로 '새 폴더' 를 고르게 한다
+    def jev_handler(request: httpx.Request):
+        body = json.loads(request.content); cands = body["state"]["candidates"]
+        answers = {f"q{i}": {"type": "score", "score": 3 if c["kind"] == "new" else 0, "confidence": 0.9} for i, c in enumerate(cands)}
+        return httpx.Response(200, json={"model": "jev-test", "answers": answers})
+    pl = file_document({"id": "prop_q", "title": "QCD notes", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=Namer(None))
+    assert pl.status == "placed_new_folder" and pl.created_folder == "강의노트" and pl.path == "강의노트"
+    assert moves[-1]["to"] == "강의노트" and moves[-1]["reason"] == "file:placed_new_folder"
+
+
+def test_file_group_attaches_siblings_to_the_leader_home():
+    from jevrag.cloudbtl import CloudBTL
+    from jevrag.filing import file_group
+    moves = []
+    cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(lambda r: _filing_tree_handler(moves, r)))
+    docs = [{"id": "prop_c", "title": "전대차약정서"}, {"id": "prop_d", "title": "전대차약정서 v2"}, {"id": "prop_e", "title": "별지"}]
+    out = file_group(docs, cb, _lease_jev())
+    assert [p.status for p in out] == ["placed", "placed_with_group", "placed_with_group"]
+    assert {m["proposalId"] for m in moves} == {"prop_c", "prop_d", "prop_e"} and len({m["to"] for m in moves}) == 1

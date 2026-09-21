@@ -48,10 +48,10 @@ class CloudBTL:
 
     # ── 1.2: browse + trees ──
     def list_documents(self, *, node: str | None = None, batch: str | None = None, source: str | None = None, q: str | None = None,
-                       kind: str | None = None, missing_producer: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+                       kind: str | None = None, missing_producer: str | None = None, not_in_tree: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         """GET /api/documents with server-side filters and cursor paging (spec 1.1+)."""
         params = {k: v for k, v in (("node", node), ("batch", batch), ("source", source), ("q", q), ("kind", kind),
-                                     ("missingProducer", missing_producer)) if v}
+                                     ("missingProducer", missing_producer), ("notInTree", not_in_tree)) if v}
         params["limit"] = str(min(200, max(1, limit)))
         out: list[dict[str, Any]] = []
         cursor = None
@@ -89,3 +89,17 @@ class CloudBTL:
         params = {k: v for k, v in (("kind", kind), ("producer", producer)) if v}
         r = self._c.get(f"/api/nodes/{node_id}/descriptors", params=params); r.raise_for_status()
         return r.json().get("descriptors", [])
+
+    def move(self, tree: str, proposal_id: str, from_node: str | None, to_path: str, *, by: str = "human", reason: str = "") -> dict[str, Any]:
+        """POST /api/trees/:tree/move — place or move a document inside a Jev-managed tree. by=human pins it."""
+        r = self._c.post(f"/api/trees/{tree}/move", json={"proposalId": proposal_id, "from": from_node, "to": to_path, "by": by, "reason": reason})
+        r.raise_for_status()
+        return r.json()
+
+    def ensure_tree(self, key: str, label: str, producer: str = "jevrag", producer_version: str = "0.2") -> dict[str, Any]:
+        r = self._c.post("/api/trees", json={"key": key, "label": label, "producer": producer, "producerVersion": producer_version}); r.raise_for_status()
+        return r.json().get("tree", {})
+
+    def upsert_nodes(self, tree: str, nodes: list[dict[str, Any]], documents: list[dict[str, Any]] | None = None, placed_by: str = "enricher") -> dict[str, Any]:
+        r = self._c.put(f"/api/trees/{tree}/nodes", json={"nodes": nodes, "documents": documents or [], "placedBy": placed_by}); r.raise_for_status()
+        return r.json()

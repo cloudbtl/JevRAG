@@ -1,4 +1,4 @@
-"""jevrag CLI — options / ask / walk / enrich-cards / replay."""
+"""jevrag CLI — options / ask / walk / file / seed-trees / enrich-cards / replay."""
 from __future__ import annotations
 
 import argparse
@@ -24,6 +24,11 @@ def main(argv=None) -> int:
     e = sub.add_parser("enrich-cards", help="write llm-cards card.doc/card.node summaries with a local Ollama model")
     e.add_argument("--limit", type=int, default=300); e.add_argument("--model", default=None); e.add_argument("--refresh", action="store_true")
     e.add_argument("--max-minutes", type=float, default=300); e.add_argument("--no-nodes", action="store_true"); e.add_argument("--log", default=None)
+    f = sub.add_parser("file", help="file documents into a Jev-managed tree (default: filed) the way a person opens folders")
+    f.add_argument("--tree", default="filed"); f.add_argument("--source"); f.add_argument("--batch"); f.add_argument("--node", help="only documents under this source-tree node id")
+    f.add_argument("--limit", type=int, default=50); f.add_argument("--group-by-folder", action="store_true", help="file one per source folder, attach siblings")
+    f.add_argument("--dry-run", action="store_true"); f.add_argument("--log", default=None); f.add_argument("--fan-out", type=int, default=20)
+    sm = sub.add_parser("seed-trees", help="create the memory (도메인→주제) and filed trees with their skeletons")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "options":
@@ -51,6 +56,38 @@ def main(argv=None) -> int:
         enr = CardEnricher(CloudBTL(), Ollama(model=ns.model or DEFAULT_MODEL), log)
         st = enr.run(limit=ns.limit, refresh=ns.refresh, max_minutes=ns.max_minutes, nodes=not ns.no_nodes)
         print(json.dumps({"documents": st.documents, "nodes": st.nodes, "failed": st.failed, "ms": st.ms}, ensure_ascii=False)); return 0
+    if ns.cmd == "seed-trees":
+        from .skeleton import memory_nodes
+        cb = CloudBTL()
+        m = cb.ensure_tree("memory", "Memory", "jevrag", "0.2"); r = cb.upsert_nodes("memory", memory_nodes(), [], placed_by="seed")
+        f_ = cb.ensure_tree("filed", "Filed", "jevrag", "0.2")
+        print(json.dumps({"memory": m.get("id"), "memory_nodes": r.get("nodes"), "filed": f_.get("id")}, ensure_ascii=False)); return 0
+    if ns.cmd == "file":
+        from .filing import file_document, file_group, Namer
+        from .enrich_cards import Ollama, DEFAULT_MODEL
+        cb = CloudBTL()
+        logf = open(ns.log, "a", encoding="utf-8") if ns.log else None
+        def log(rec):
+            print(json.dumps({"ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"), **rec}, ensure_ascii=False), file=logf or sys.stdout, flush=True)
+        try:
+            namer = Namer(Ollama(model=DEFAULT_MODEL))
+        except Exception:  # noqa: BLE001
+            namer = Namer(None)
+        # 배치 대기 = 이 트리 어디에도 붙지 않은 문서(서버 필터 notInTree). 원천·묶음·원천 노드로 범위를 좁힐 수 있다.
+        todo = cb.list_documents(source=ns.source, batch=ns.batch, node=ns.node, not_in_tree=ns.tree, limit=200)[: ns.limit]
+        results = []
+        if ns.group_by_folder:
+            groups: dict[str, list] = {}
+            for d in todo:
+                key = (d.get("sourceRef") or "").rsplit("/", 1)[0]
+                groups.setdefault(key, []).append(d)
+            for key, ds in groups.items():
+                results += file_group(ds, cb, tree=ns.tree, fan_out=ns.fan_out, namer=namer, dry_run=ns.dry_run, log=log)
+        else:
+            for d in todo:
+                results.append(file_document(d, cb, tree=ns.tree, fan_out=ns.fan_out, namer=namer, dry_run=ns.dry_run, log=log))
+        from collections import Counter
+        print(json.dumps({"filed": len(results), "status": dict(Counter(p.status for p in results)), "new_folders": [p.created_folder for p in results if p.created_folder]}, ensure_ascii=False)); return 0
     if ns.cmd == "replay":
         p = Pipeline.from_env()
         for rec in DecisionLog(ns.log_path).read():
