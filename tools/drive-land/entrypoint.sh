@@ -9,6 +9,8 @@ set -euo pipefail
 : "${MAX_MINUTES_PER_DRIVE:=90}"
 : "${DRIVE_IDS:=}"          # 콤마 구분. 비우면 전부.
 : "${INCLUDE_SHARED_WITH_ME:=1}"
+: "${LAND_RUN_BASELINE:=0}"   # 0 = 추출은 큐에 넣고 drain 이 처리(대량 이관), 1 = 인라인
+EXTRA=""; [ "$LAND_RUN_BASELINE" = "0" ] && EXTRA="--no-baseline"
 mkdir -p ~/.config/rclone
 printf '%s\n' '[gdrive]' 'type = drive' 'env_auth = true' 'scope = drive.readonly' 'export_formats = docx,xlsx,pptx' > ~/.config/rclone/rclone.conf
 drives_json="$(rclone backend drives gdrive: 2>/dev/null || echo '[]')"
@@ -45,9 +47,9 @@ echo "$ordered" | while IFS='|' read -r id name; do
   meta="$(python3 -c 'import json,sys; print(json.dumps({"drive": sys.argv[1], "driveId": sys.argv[2]}, ensure_ascii=False))' "$name" "$id")"
   echo "{"event":"task_drive","task":$TASK_INDEX,"drive":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1],ensure_ascii=False))' "$name")}"
   python3 /app/rclone_land.py --remote "gdrive,team_drive=$id:" --prefix "$name" --source gdrive --metadata "$meta" \
-    --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-$id.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" || true
+    --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-$id.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" $EXTRA || true
 done
 if [ "$INCLUDE_SHARED_WITH_ME" = "1" ] && [ "$TASK_INDEX" = "0" ]; then
   python3 /app/rclone_land.py --remote 'gdrive,shared_with_me=true:' --prefix 'shared-with-me' --source gdrive --metadata '{"drive":"shared-with-me"}' \
-    --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-shared-with-me.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" || true
+    --state "gs://$STATE_BUCKET/$STATE_PREFIX/land-shared-with-me.json" --max-minutes "$MAX_MINUTES_PER_DRIVE" $EXTRA || true
 fi
