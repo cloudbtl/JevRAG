@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .cloudbtl import CloudBTL
@@ -13,6 +14,9 @@ from .pipeline import Pipeline
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="jevrag")
+    ap.add_argument("--local", metavar="DIR", default=os.getenv("JEVRAG_LOCAL_ROOT"),
+                    help="run over a directory on this machine instead of CloudBTL (folders = nodes, files = documents; filing moves files)")
+    ap.add_argument("--inbox", metavar="DIR", default=None, help="with --local: the folder whose files are the filing queue (default <DIR>/_inbox)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("options", help="show the option card for a document"); o.add_argument("doc_id")
     a = sub.add_parser("ask", help="ask a question over documents in scope"); a.add_argument("question")
@@ -31,6 +35,15 @@ def main(argv=None) -> int:
     sm = sub.add_parser("seed-trees", help="create the memory (도메인→주제) and filed trees with their skeletons")
     ns = ap.parse_args(argv)
 
+    def source():
+        """CloudBTL by default; a LocalTree when --local/JEVRAG_LOCAL_ROOT is set. Same walk, same filing rules."""
+        if ns.local:
+            from .localtree import LocalTree
+            return LocalTree(ns.local, ns.inbox)
+        return CloudBTL()
+
+    if ns.cmd == "options" and ns.local:
+        print(json.dumps(source().options(at=ns.doc_id), ensure_ascii=False, indent=2)); return 0
     if ns.cmd == "options":
         cb = CloudBTL(); docs = {d["id"]: d for d in cb.documents()}
         d = docs.get(ns.doc_id) or {"id": ns.doc_id, "title": ns.doc_id}
@@ -43,7 +56,7 @@ def main(argv=None) -> int:
                           "top": ans.decision.ranked[:5], "evidence": ans.evidence}, ensure_ascii=False, indent=2)); return 0
     if ns.cmd == "walk":
         from .walk import walk
-        res = walk(ns.question, CloudBTL(), tree=ns.tree, start=ns.start, max_hops=ns.max_hops, fan_out=ns.fan_out, into_pages=ns.pages)
+        res = walk(ns.question, source(), tree=ns.tree, start=ns.start, max_hops=ns.max_hops, fan_out=ns.fan_out, into_pages=ns.pages)
         print(json.dumps({"status": res.status, "path": res.path, "target": (res.target.for_model() | {"id": res.target.id}) if res.target else None,
                           "hops": [{"at": h.at.get("label"), "source": h.source, "top": h.ranked[:3], "jev_ms": h.jev.elapsed_ms if h.jev else None} for h in res.hops]},
                          ensure_ascii=False, indent=2)); return 0
@@ -65,7 +78,7 @@ def main(argv=None) -> int:
     if ns.cmd == "file":
         from .filing import file_document, file_group, Namer
         from .enrich_cards import Ollama, DEFAULT_MODEL
-        cb = CloudBTL()
+        cb = source()
         logf = open(ns.log, "a", encoding="utf-8") if ns.log else None
         def log(rec):
             print(json.dumps({"ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"), **rec}, ensure_ascii=False), file=logf or sys.stdout, flush=True)

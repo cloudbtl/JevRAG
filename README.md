@@ -128,6 +128,40 @@ Rules learned from the first live runs (the log names them in `hops[].source`):
 - Bulk arrivals are filed one per source folder; siblings follow a decided leader (`placed_with_group`) and stay queued behind an undecided one (`undecided_with_group`).
 - Node summaries record the document count they were written from (`payload.basis`); `enrich-cards` rewrites a node whose count moved by more than max(3, 20%) before summarising new nodes.
 
+## On your own desk — no server
+
+The engine does not know where its options come from. `LocalTree` answers the same hops over a directory on this
+machine: a folder is a node, a file is a document, and the cards are what the file system already knows — names,
+extensions, sizes, modified times, subtree counts, plus cheap facts read from the zip directory (xlsx sheet names,
+pptx slide count, Office titles, PDF page count) and the first line of small text files. No bytes of body text.
+
+```bash
+jevrag --local ~/Documents walk "SEI타워 렌트롤"                 # same hops, same Jev questions, ~0.6 s each
+jevrag --local ~/Documents file --log ~/Documents/.jevrag/file.jsonl   # queue = ~/Documents/_inbox → files are moved on disk
+jevrag --local ~/Documents --inbox ~/Downloads file --dry-run    # any folder can be the inbox
+```
+
+Filing moves files. Every move is appended to `.jevrag/ledger.jsonl` (from, to, by, reason); a file a person moved
+by hand (`by=human`) is pinned and Jev never moves it again — the same contract as CloudBTL's placement ledger. Domain
+folders (never hold files directly, get a written description) are declared in `.jevrag/config.json`:
+
+```json
+{"domains": {"업무": "회사 자료 — 계약·견적·제안·렌트롤", "개인": "개인 자료 — 영수증·사진"}}
+```
+
+A local enricher (Ollama, say) can write cards to `.jevrag/cards.jsonl` through the same `put_descriptors`; hops show
+them next to the baseline. Where things live, laptop to lake:
+
+| | Laptop (`--local`) | CloudBTL (Smartlake) |
+|---|---|---|
+| Nodes / documents | folders / files | trees (`folders`, `filed`, `memory`, facets) / documents |
+| Baseline cards | `local-baseline`: file-system facts | `cloudbtl-baseline`: text, pages, sheets, rollups |
+| Enricher cards | `.jevrag/cards.jsonl` | descriptors under the enricher's producer |
+| Filing queue | the inbox folder | `GET /documents?notInTree=<tree>` |
+| Placement ledger | `.jevrag/ledger.jsonl` | `node_documents.placedBy/pinned` + audit `tree.move` |
+| Human override | move the file; it is pinned | `POST /trees/:t/move by=human`; pinned |
+| Engine, thresholds, rules, logs | **the same** | **the same** |
+
 ## The loop, step by step
 
 1. **Candidates** — `Pipeline` pulls documents in scope from CloudBTL (`GET /api/me/proposals`,

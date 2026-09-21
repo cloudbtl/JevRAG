@@ -360,11 +360,15 @@ def test_filing_in_a_domain_folder_never_drops_the_document_there_and_reuses_a_s
         def name(self, question, siblings, parent, depth=1):
             return "더갤러리 832"   # 형제 '더갤러리832' 와 같은 대상 — 표기만 다르다
     cb = CloudBTL(base="https://t.local", token="k", transport=httpx.MockTransport(handler))
-    pl = file_document({"id": "prop_loi", "title": "입점의향서_더갤러리832", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=StubNamer(None))
+    pl = file_document({"id": "prop_loi", "title": "입점의향서_강남 갤러리 832호", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=StubNamer(None))
     # 도메인 폴더에서 모델이 미결 → '여기' 는 선택지에도 없고, Namer 이름이 형제와 같아 그 폴더로 내려가 거기에 둔다
     assert [c["kind"] for c in pl.hops[1]["candidates"]] == ["node", "new"]
     assert pl.hops[1]["chosen"] == "node_g" and pl.hops[1]["source"].endswith("+rule:namer-match")
     assert pl.status == "undecided_here" and pl.path == "부동산본부/더갤러리832" and moves[-1]["to"] == "부동산본부/더갤러리832"
+    # 폴더명이 제목 안에 그대로 있으면 모델을 기다리지 않고 그 폴더로 (계약서 ⊂ 임대차계약서)
+    moves.clear()
+    pl2 = file_document({"id": "prop_loi2", "title": "입점의향서_더갤러리832_모담다이닝", "documentType": "pdf"}, cb, Jev(api_key="k", transport=httpx.MockTransport(jev_handler)), namer=Namer(None))
+    assert pl2.hops[1]["chosen"] == "node_g" and pl2.hops[1]["source"].endswith("+rule:label-in-title") and pl2.path == "부동산본부/더갤러리832"
 
 
 def test_filing_walks_to_the_most_specific_folder_and_records_the_placement():

@@ -29,8 +29,9 @@ PLACED_BY = "jev"
 
 def document_question(doc: dict[str, Any], cards: list[dict[str, Any]]) -> str:
     """What the filing model reads about the document being placed — masked, no bodies."""
-    base = next((c.get("payload") for c in cards if c.get("producer") == "cloudbtl-baseline" and c.get("kind") == "card.doc"), {}) or {}
-    enr = next((c.get("payload") for c in cards if c.get("producer") != "cloudbtl-baseline" and c.get("kind") == "card.doc" and (c.get("payload") or {}).get("summary")), {}) or {}
+    is_base = lambda c: str(c.get("producer") or "").endswith("-baseline")  # noqa: E731
+    base = next((c.get("payload") for c in cards if is_base(c) and c.get("kind") == "card.doc"), {}) or {}
+    enr = next((c.get("payload") for c in cards if not is_base(c) and c.get("kind") == "card.doc" and (c.get("payload") or {}).get("summary")), {}) or {}
     parts = [
         f"제목: {doc.get('title')}",
         f"유형: {enr.get('docType') or doc.get('documentType') or ''}",
@@ -142,6 +143,12 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
         hops.append({"at": path or "(root)", "candidates": [c.for_model() | {"id": c.id} for c in choices], "ranked": hop.ranked[:5],
                      "chosen": hop.chosen.id if hop.chosen else None, "source": hop.source, "jev_ms": hop.jev.elapsed_ms if hop.jev else None})
         ch = hop.chosen
+        if ch is None and folders:
+            # a folder whose name sits inside the document title (계약서 ⊂ 임대차계약서_더갤러리832) is where a person would go
+            title_n = _norm(doc.get("title") or "")
+            hit = [f for f in folders if len(_norm(f.label)) >= 2 and _norm(f.label) in title_n]
+            if len(hit) == 1:
+                hop.chosen = ch = hit[0]; hops[-1]["chosen"] = ch.id; hops[-1]["source"] += "+rule:label-in-title"
         if ch is None and is_domain:
             # 도메인 폴더에서 미결: 문서를 여기 두지 않는다. 이름을 지어 보고, 형제 중 같은 이름이 있으면 그 폴더로 들어가고 없으면 만든다.
             name = namer.name(question, [f.label for f in folders], path, depth=path.count("/") + 2)
@@ -171,9 +178,12 @@ def file_document(doc: dict[str, Any], cb: CloudBTL, jev: Jev | None = None, *, 
     return _finish(doc, cb, tree, path, node_id, None, hops, "placed", t0, dry_run, log, question)
 
 
+def _norm(x: str) -> str:
+    return "".join(ch for ch in str(x).lower() if ch.isalnum())
+
+
 def _same_label(a: str, b: str) -> bool:
-    norm = lambda x: "".join(ch for ch in str(x).lower() if ch.isalnum())  # noqa: E731
-    return bool(norm(a)) and norm(a) == norm(b)
+    return bool(_norm(a)) and _norm(a) == _norm(b)
 
 
 def _finish(doc, cb, tree, path, node_id, created, hops, status, t0, dry_run, log, question, move: bool = True) -> Placement:

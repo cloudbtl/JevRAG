@@ -23,6 +23,7 @@ from .options import mask
 
 USEFUL_MIN = 2           # documents, pages, stop: "useful for locating / partial evidence" or better
 NODE_MIN = 1.5           # folders only locate — a folder card rarely "directly states" anything, so entering one takes less
+LEAF_DOC_MIN = 1.25      # in a folder with no subfolders, a topic-matching document (rubric 1 = "unknown whether it holds it") beats wandering
 GROUP_THRESHOLD = 8      # more documents than this at a node → show type groups first
 _WORD = re.compile(r"[\w가-힣]+")
 
@@ -62,7 +63,7 @@ def _cards(o: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         p = c.get("payload") or {}
         if not isinstance(p, dict):
             continue
-        if c.get("producer") == "cloudbtl-baseline":
+        if str(c.get("producer") or "").endswith("-baseline"):   # cloudbtl-baseline on the server, local-baseline on a laptop
             base = p
         elif p.get("summary") or p.get("docType"):
             enr = p
@@ -212,6 +213,12 @@ def walk(question: str, cb: OptionsSource, jev: Jev | None = None, *, tree: str 
         hop = _decide_hop(question, res.get("at") or {}, choices, jev)
         hops.append(hop)
         ch = hop.chosen
+        if ch is None and not any(c.kind == "node" for c in cards):
+            # leaf folder: the best option is a document whose card only proves the topic matches (a filename, say). A person opens it.
+            best_id, best_score, _ = hop.ranked[0]
+            best = next((c for c in cards if c.id == best_id), None)
+            if best is not None and best.kind == "document" and best_score >= LEAF_DOC_MIN:
+                hop.chosen = ch = best; hop.source += "+rule:leaf-doc"
         if ch is None:
             if len(stack) > 1:                                 # nothing convincing here → treat as 'up'
                 exhausted.add(at); stack.pop(); continue
