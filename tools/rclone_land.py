@@ -64,15 +64,16 @@ def fetch_group(remote: str, paths: list[str], tmp: Path) -> dict[str, bytes]:
     return out
 
 
-def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix: str, source: str, metadata: dict, batch: str) -> dict:
+def direct_land(client: httpx.Client, remote: str, f: dict, tmp: Path, *, prefix: str, source: str, metadata: dict, batch: str, data: bytes | None = None) -> dict:
     """init -> rclone copy to tmp -> PUT to the session URL (no API/proxy in the byte path) -> commit."""
-    init = client.post("/api/documents/land/init", json={"filename": f["Name"], "size": f["Size"]})
+    if data is None:
+        blobs = fetch_group(remote, [f["Path"]], tmp)
+        data = blobs.get(f["Path"])
+        if data is None:
+            raise RuntimeError("read_failed")
+    init = client.post("/api/documents/land/init", json={"filename": f["Name"], "size": len(data)})
     init.raise_for_status()
     ticket = init.json()
-    blobs = fetch_group(remote, [f["Path"]], tmp)
-    data = blobs.get(f["Path"])
-    if data is None:
-        raise RuntimeError("read_failed")
     with httpx.Client(timeout=1800) as up:
         r = up.put(ticket["uploadUrl"], content=data, headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(data))})
         if r.status_code not in (200, 201):
@@ -108,7 +109,14 @@ def main() -> int:
     metadata = json.loads(ns.metadata)
     prefix = ns.prefix if ns.prefix is not None else ns.remote.split(":", 1)[1].strip("/")
     batch = ns.batch or f"{ns.source}_{time.strftime('%Y%m%d')}"
-    state_path = Path(ns.state)
+    gcs_state = ns.state if ns.state.startswith("gs://") else None
+    if gcs_state:
+        # 컨테이너(Cloud Run Job)는 무상태 — 상태 파일을 GCS 에 두고 시작 때 내려받고 저장 때마다 올린다.
+        state_path = Path("/tmp/rclone_land_state") / (gcs_state.rsplit("/", 1)[-1] or "state.json")
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([RCLONE, "copyto", ":gcs,env_auth=true:" + gcs_state[len("gs://"):], str(state_path), "-q"], capture_output=True)
+    else:
+        state_path = Path(ns.state)
     state: dict = json.loads(state_path.read_text()) if state_path.exists() else {}
     logf = open(ns.log, "a", encoding="utf-8") if ns.log else sys.stdout
 
@@ -119,9 +127,11 @@ def main() -> int:
         tmp = state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False))
         tmp.replace(state_path)
+        if gcs_state:
+            subprocess.run([RCLONE, "copyto", str(state_path), ":gcs,env_auth=true:" + gcs_state[len("gs://"):], "-q"], capture_output=True)
 
     files = listing(ns.remote)
-    todo, big, oversize, junk, done = [], [], 0, 0, 0
+    todo, big, unknown, oversize, junk, done = [], [], [], 0, 0, 0
     for f in files:
         if is_junk(f["Path"]):
             junk += 1
@@ -130,6 +140,9 @@ def main() -> int:
         st = state.get(k, {}).get("status")
         if st in ("landed", "deduplicated", "empty") or (st == "oversize" and f.get("Size", 0) > MAX_DIRECT_BYTES):
             done += 1
+            continue
+        if f.get("Size", 0) < 0:  # 내보내기 문서(Docs/Sheets/Slides): 크기를 모른다 → 하나씩 받아 실제 길이로 경로 결정
+            unknown.append(f)
             continue
         if not f.get("Size"):
             state[k] = {"status": "empty"}
@@ -144,10 +157,11 @@ def main() -> int:
         todo.append(f)
     todo = todo[: ns.limit]
     big = big[: max(0, ns.limit - len(todo))]
+    unknown = unknown[: max(0, ns.limit - len(todo) - len(big))]
     log({"event": "plan", "remote": ns.remote, "files": len(files), "already": done, "junk": junk, "too_large": oversize, "todo": len(todo), "bytes": sum(f["Size"] for f in todo),
-         "direct": len(big), "direct_bytes": sum(f["Size"] for f in big)})
+         "direct": len(big), "direct_bytes": sum(f["Size"] for f in big), "unknown_size": len(unknown)})
     save()
-    if ns.dry_run or not (todo or big):
+    if ns.dry_run or not (todo or big or unknown):
         return 0
 
     client = httpx.Client(base_url=base, timeout=300, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
@@ -216,7 +230,39 @@ def main() -> int:
             failed += 1
             log({"event": "direct_failed", "path": f["Path"], "bytes": f["Size"], "error": str(e)[:300]})
         save()
-    log({"event": "done", "landed": landed, "deduplicated": dedup, "failed": failed, "remaining": (len(todo) - i) + (len(big) - j)})
+    u = 0
+    tmpdir = state_path.parent / ("." + state_path.stem + ".tmp")
+    while u < len(unknown) and time.time() < deadline:
+        f = unknown[u]; u += 1
+        t0 = time.time()
+        try:
+            data = fetch_group(ns.remote, [f["Path"]], tmpdir).get(f["Path"])
+            if data is None:
+                raise RuntimeError("read_failed")
+            if not data:
+                state[key_of(f)] = {"status": "empty"}; save(); continue
+            ref = (prefix + "/" if prefix else "") + f["Path"]
+            if len(data) > REQUEST_BYTE_CAP:
+                res = direct_land(client, ns.remote, f, tmpdir, prefix=prefix, source=ns.source, metadata=metadata, batch=batch, data=data)
+                item = res
+            else:
+                form = {"source": ns.source, "sourceRefs": json.dumps([ref], ensure_ascii=False), "metadata": json.dumps(metadata, ensure_ascii=False),
+                        "ingestBatch": batch, "linkMode": "none", "dedupe": "true", "runBaseline": "true"}
+                r = client.post("/api/documents/land", data=form, files=[("files", (f["Name"], data, "application/octet-stream"))])
+                r.raise_for_status()
+                item = (r.json().get("results") or [{}])[0]
+            if not item.get("ok"):
+                raise RuntimeError(item.get("error") or "failed")
+            st = "deduplicated" if item.get("deduplicated") else "landed"
+            state[key_of(f)] = {"status": st, "id": (item.get("proposal") or {}).get("id"), "bytes": len(data), "exported": True}
+            landed += st == "landed"; dedup += st == "deduplicated"
+            log({"event": "exported", "path": f["Path"], "bytes": len(data), "ms": round((time.time() - t0) * 1000), "status": st})
+        except Exception as e:  # noqa: BLE001
+            state[key_of(f)] = {"status": "failed", "error": str(e)[:300], "exported": True}
+            failed += 1
+            log({"event": "export_failed", "path": f["Path"], "error": str(e)[:300]})
+        save()
+    log({"event": "done", "landed": landed, "deduplicated": dedup, "failed": failed, "remaining": (len(todo) - i) + (len(big) - j) + (len(unknown) - u)})
     return 0
 
 
