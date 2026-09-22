@@ -61,7 +61,9 @@ def fetch_group(remote: str, paths: list[str], tmp: Path) -> dict[str, bytes]:
     tmp.mkdir(parents=True)
     listfile = tmp.parent / (tmp.name + ".list")
     listfile.write_text(chr(10).join(paths) + chr(10), encoding="utf-8")
-    subprocess.run([RCLONE, "copy", remote, str(tmp), "--files-from", str(listfile), "--no-traverse", "--transfers", "8", "--checkers", "8", "-q"],
+    # --files-from treats a leading # as a comment. Project folders commonly
+    # start with codes such as "#240408 …", so use the literal/raw variant.
+    subprocess.run([RCLONE, "copy", remote, str(tmp), "--files-from-raw", str(listfile), "--no-traverse", "--transfers", "8", "--checkers", "8", "-q"],
                    capture_output=True, check=True)
     out: dict[str, bytes] = {}
     for p in paths:
